@@ -13,9 +13,18 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_3_AVAILABLE = False
 
+# 2026-09-04 melite patch: guard hardened past ModuleNotFoundError.
+# Foreign packs in the shared process (seedvr2_videoupscaler's
+# ensure_flash_attn_safe) inject a sys.modules["flash_attn"] STUB
+# whose flash_attn_func is None when the real ext is absent — the
+# bare try/import then reports AVAILABLE and the first DiT block
+# dies on 'NoneType' object is not callable (which, under
+# torch.compile, escalated to an inductor SEGFAULT killing the whole
+# server). The flag now means "callable exists", full stop.
 try:
     import flash_attn
-    FLASH_ATTN_2_AVAILABLE = True
+    FLASH_ATTN_2_AVAILABLE = callable(
+        getattr(flash_attn, "flash_attn_func", None))
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 

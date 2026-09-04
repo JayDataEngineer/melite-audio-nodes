@@ -701,8 +701,24 @@ _MELITE_SFX_COMPILE_OPTIONS = (
     {"triton.cudagraphs": True} if _MELITE_SFX_CUDAGRAPHS else {}
 )
 
+# 2026-09-04 melite patch: EAGER OPT-OUT. torch 2.11/cu128's inductor
+# segfaults the WHOLE process during the first-generation compile of
+# this DiT (live-catch: 'device' object has no attribute 'prev_idx'
+# inside the compile, then "Fatal Python error: Segmentation fault" —
+# the ComfyUI server dies with it; RESILIENCE LAW violated at the
+# process level, not the run level). AUDIOCORE_SFX_EAGER=1 skips
+# torch.compile entirely (eager forward, ~0.5s/step slower per the
+# cache docstring, but the lane runs and the server survives).
+_MELITE_SFX_EAGER = os.environ.get("AUDIOCORE_SFX_EAGER", "0") == "1"
 
-@torch.compile(options=_MELITE_SFX_COMPILE_OPTIONS, fullgraph=True)
+
+def _maybe_compile(fn):
+    if _MELITE_SFX_EAGER:
+        return fn
+    return torch.compile(options=_MELITE_SFX_COMPILE_OPTIONS, fullgraph=True)(fn)
+
+
+@_maybe_compile
 def model_fn_wan_video(
     dit: WanAudioModel,
     motion_controller = None,
