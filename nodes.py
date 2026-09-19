@@ -9,6 +9,8 @@ Exposes the full inference surface via NATIVE in-process loading
   - UnloadAudiocoreModel — release VRAM
   - AudiocoreFamilyInfo — list registered families
   - AudiocoreVoiceStudio — voice artifact authoring (uses qwen-tts Python directly)
+  - MeliteAudioSlice — the audio-bed cut node (sample-grain slicing +
+    silence-pad; the h3-timeline convenience layer's engine half)
 """
 from __future__ import annotations
 
@@ -795,6 +797,70 @@ class AudiocoreFamilyInfo:
         return {"ui": {"text": [text]}, "result": (text,)}
 
 
+# ── MeliteAudioSlice (the audio-bed cut node — the h3-timeline
+# convenience layer's engine half, 2026-09-20). ONE track spread
+# across a film's windows needs per-window CUTS: sample-grain
+# slicing (start_seconds at the source's own sample rate, never a
+# resample) + silence-pad to the requested duration (H3's AV path
+# needs a legal-length waveform even when the bed ends mid-window;
+# existing samples stay bit-for-bit). The math adapts
+# Songssx/ComfyUI-MiniMaxH3-TimelineDirector's
+# _locked_audio_interval (GPL-3.0, credited — the license note
+# lives in docs/comfyui/timeline-director-study.md).
+try:
+    import folder_paths
+except ImportError:  # standalone tooling/tests, never inside ComfyUI
+    folder_paths = None
+
+
+def torchaudio_load_audio(path: str):
+    """Load a file as (waveform[1, C, N], sample_rate) — ComfyUI's
+    AUDIO dict convention (torchaudio.load + the batch dim)."""
+    import torchaudio
+
+    waveform, sample_rate = torchaudio.load(path)
+    return waveform.unsqueeze(0), int(sample_rate)
+
+
+class MeliteAudioSlice:
+    """Slice a ComfyUI-dir audio file by seconds; pad silence to length."""
+
+    CATEGORY = "audio/melite"
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "slice_audio"
+    DESCRIPTION = "Cut a bed track at start_seconds for duration_seconds, padding silence when the source runs short."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        audio_files = folder_paths.get_filename_list("audio") if folder_paths is not None else []
+        return {
+            "required": {
+                "audio": (audio_files, {"audio upload": "audio"}),
+                "start_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.01}),
+                "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.1, "step": 0.01}),
+            },
+        }
+
+    def slice_audio(self, audio: str, start_seconds: float, duration_seconds: float):
+        if folder_paths is None:
+            raise RuntimeError("MeliteAudioSlice requires ComfyUI (folder_paths)")
+        if duration_seconds <= 0:
+            raise ValueError("MeliteAudioSlice: duration_seconds must be positive")
+        path = folder_paths.get_annotated_filepath(audio)
+        waveform, sample_rate = torchaudio_load_audio(path)
+        # sample-grain slice (never a resample): start lands on the
+        # nearest sample at the SOURCE's own rate
+        expected = int(round(duration_seconds * sample_rate))
+        source_sample = int(round(max(0.0, start_seconds) * sample_rate))
+        source_sample = min(max(0, source_sample), int(waveform.shape[-1]))
+        cut = waveform[..., source_sample:source_sample + expected]
+        if cut.shape[-1] < expected:
+            # silence-pad: existing samples stay bit-for-bit, the
+            # tail fills to the legal duration
+            cut = torch.nn.functional.pad(cut, (0, expected - int(cut.shape[-1])))
+        return ({"waveform": cut, "sample_rate": sample_rate},)
+
+
 # ── Mappings ─────────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
@@ -805,6 +871,7 @@ NODE_CLASS_MAPPINGS = {
     "AudiocoreVoiceStudio": AudiocoreVoiceStudio,
     "UnloadAudiocoreModel": UnloadAudiocoreModel,
     "AudiocoreFamilyInfo": AudiocoreFamilyInfo,
+    "MeliteAudioSlice": MeliteAudioSlice,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -815,4 +882,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AudiocoreVoiceStudio": "Voice Studio",
     "UnloadAudiocoreModel": "Unload Audiocore Model",
     "AudiocoreFamilyInfo": "Audiocore Family Info",
+    "MeliteAudioSlice": "Melite Audio Slice",
 }
