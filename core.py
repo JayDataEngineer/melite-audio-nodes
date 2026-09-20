@@ -54,6 +54,17 @@ _FAMILY_TASK: dict[str, str] = {
     "ace_step":         "gen",
 }
 
+# Variant → engine task code (2026-09-20, the 1.7B receipt stroke):
+# the C++ gates per CHECKPOINT variant, not per family — a
+# VoiceDesign-variant checkpoint refuses task tts LOUD ("Qwen3
+# voice design model only supports the VoiceDesign task", task
+# code "vdes" per the fork's session.cpp parse). The lane steers
+# via extras.variant (the estate's ENGINE_TRUTH key); the family
+# map above stays the default.
+_VARIANT_TASK: dict[str, str] = {
+    "voicedesign":      "vdes",
+}
+
 # Families whose engine loader scans the model DIRECTORY for sibling GGUFs.
 _DIR_SCAN_FAMILIES = ("moss_sfx_v2",)
 
@@ -295,6 +306,15 @@ class ManagedModel:
                 model_file=self._extras.get("model_file", ""),
             )
             task = _FAMILY_TASK.get(self.family, "tts")
+            # Variant-routed task (the 1.7B stroke): a stated variant
+            # steers the C++ session task off the family default.
+            variant_task = _VARIANT_TASK.get(self._variant.lower())
+            if variant_task:
+                logger.info(
+                    "routing %s task %s → %s via variant=%r",
+                    self.family, task, variant_task, self._variant,
+                )
+                task = variant_task
             model_spec = _AUDIOCPP_MODEL_SPECS if os.path.isdir(_AUDIOCPP_MODEL_SPECS) else None
 
             self._session = NativeSession(
