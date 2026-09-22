@@ -94,6 +94,43 @@ def detect_kind(path: str) -> Kind | None:
 # ── Writers ──────────────────────────────────────────────────────────────
 
 
+def size_tag(model_dir: str) -> str:
+    """'Qwen3-TTS-12Hz-0.6B-Base' → 'base-0.6b' (the export provenance
+    tag). Unrecognized dirs → '' (legacy, dim fallback covers it)."""
+    import re
+    m = re.search(r"(0\.6B|1\.7B)[^/]*-(Base|CustomVoice|VoiceDesign)", model_dir, re.I)
+    if not m:
+        return ""
+    size, kind = m.group(1), m.group(2).lower()
+    if kind == "customvoice":
+        kind = "customvoice"
+    elif kind == "voicedesign":
+        kind = "voicedesign"
+    return f"{kind}-{size.lower().rstrip(chr(98))}b"
+
+
+def preview_size_hint(payload: dict) -> str | None:
+    """The variant hint a lite payload must load: the stored
+    export_variant when present, else the embedding's own length
+    (1024 → 0.6B, 2048 → 1.7B — the speaker encoder's dim IS the
+    provenance). None = no provenance at all (refuse loud)."""
+    tag = str(payload.get("export_variant") or "").strip()
+    if tag:
+        return tag
+    items = payload.get("items") or []
+    if items:
+        emb = items[0].get("ref_spk_embedding")
+        try:
+            n = int(getattr(emb, "shape", [getattr(emb, "__len__", lambda: 0)()])[0])
+        except Exception:
+            return None
+        if n == 1024:
+            return "base-0.6b"
+        if n == 2048:
+            return "base-1.7b"
+    return None
+
+
 def write_lite(
     path: str,
     *,
@@ -102,6 +139,7 @@ def write_lite(
     sample_text: str,
     items: list[Any],
     voices_dir: str | None = None,
+    export_variant: str = "",
 ) -> int:
     """Write a lite qvoice from a list of qwen_tts.VoiceClonePromptItem.
 
@@ -115,12 +153,18 @@ def write_lite(
     """
     import torch
 
+    # EXPORT PROVENANCE (2026-09-22): the size the items were
+    # captured on ("base-0.6b"/"base-1.7b") — the loader resolves the
+    # SAME size or refuses (a 1024-dim embedding on a 2048-dim talker
+    # dies mid-graph). Legacy payloads without it fall back to the
+    # embedding's own length.
     payload_obj: dict[str, Any] = {
         "format": "qvoice-lite",
         "version": VERSION,
         "name": name,
         "instruct": instruct,
         "sample_text": sample_text,
+        "export_variant": export_variant,
         "created_at": time.time(),
         "items": [
             {

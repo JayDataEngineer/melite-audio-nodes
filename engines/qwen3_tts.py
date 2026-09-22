@@ -329,6 +329,7 @@ class Qwen3TtsEngine:
                     instruct=instruct,
                     sample_text=synth_text,
                     items=items,
+                    export_variant=_qv.size_tag(self._model_dir or ""),
                 )
                 logger.info(
                     "qvoice: wrote lite %s (%d bytes payload)",
@@ -452,10 +453,23 @@ class Qwen3TtsEngine:
         from qwen_tts import VoiceClonePromptItem
         import torch
 
-        # Lite needs the Base variant for generate_voice_clone.
-        self._ensure_variant("base")
-
         payload = _qv.read_lite(qvoice_path)
+
+        # ARTIFACT-DRIVEN VARIANT (the 1024/2048 catch, 2026-09-22):
+        # a lite .qvoice is size-locked to its export checkpoint —
+        # the stored export_variant names it; legacy payloads fall
+        # back to the embedding's own length (1024 → 0.6B, 2048 →
+        # 1.7B). NEVER the size-less "base" (the repo-order default
+        # would load 1.7B against a 1024-dim artifact and die
+        # mid-graph).
+        hint = _qv.preview_size_hint(payload)
+        if hint is None:
+            raise RuntimeError(
+                "preview_voice: lite qvoice carries no size "
+                "provenance (no export_variant, unreadable embedding "
+                "length) — re-export the voice."
+            )
+        self._ensure_variant(hint)
         items_raw = payload.get("items") or []
         if not items_raw:
             raise RuntimeError(
@@ -504,10 +518,16 @@ class Qwen3TtsEngine:
         if talker_state:
             applied = self._apply_talker_state(talker_state)
             if not applied:
-                logger.warning(
-                    "preview_voice: talker_state did not match any module "
-                    "parameters — the .qvoice may be from a different model "
-                    "size. Continuing with the unpatched CV talker."
+                # NEVER SILENT (2026-09-22): an unapplied talker patch
+                # means the rendered voice is NOT the designed one —
+                # the artifact is from another model size. Warn-and-
+                # continue rendered a wrong voice as if it were right.
+                raise RuntimeError(
+                    "preview_voice: wdelta qvoice's talker_state did not "
+                    "match any module parameters — the artifact is from "
+                    "a different model size than the loaded "
+                    "CustomVoice. Re-export the voice on this "
+                    "checkpoint's size."
                 )
 
         # Re-extract the embedding from the stored source_ref_audio so
@@ -1020,6 +1040,7 @@ class Qwen3TtsEngine:
 
         # Determine which variant to load.
         want_variant = "customvoice"  # default
+        want_size = None  # None = 1.7B first (the quality preference)
         if variant_hint:
             hint = variant_hint.lower()
             if "base" in hint or "clone" in hint:
@@ -1028,6 +1049,17 @@ class Qwen3TtsEngine:
                 want_variant = "voicedesign"
             elif "custom" in hint or "voice" in hint:
                 want_variant = "customvoice"
+            # SIZE PROVENANCE (2026-09-22, the 1024/2048 catch): a
+            # .qvoice artifact is size-locked to the checkpoint that
+            # exported it (0.6B speaker encoder emits 1024-dim
+            # embeddings, 1.7B emits 2048 — the talker cats them and
+            # a mismatch dies mid-graph). Hints may carry the size
+            # ("base-0.6b"/"base-1.7b"): when stated it ORDERS the
+            # repo list; when absent the 1.7B leads (quality).
+            if "0.6" in hint:
+                want_size = "0.6B"
+            elif "1.7" in hint:
+                want_size = "1.7B"
         else:
             # Fall back to path-suffix detection.
             path_lc = path.lower().rstrip("/")
@@ -1038,19 +1070,35 @@ class Qwen3TtsEngine:
                 want_variant = "voicedesign"
 
         # Per-variant HF repo IDs (for snapshot_download lookup).
+        # LARGER FIRST (operator catch f, 2026-09-22): the resolver
+        # walks this list and takes the first variant present
+        # locally — 0.6B-first silently condemned the clone/reuse
+        # lanes to the small model's weaker fidelity (worse persona
+        # lock) even where the 1.7B dirs exist. 1.7B leads; 0.6B is
+        # the fallback when the larger dir was never placed. (The
+        # dirs live under extra_model_paths' qwen3_tts/hf — they are
+        # placed out-of-band, not provisioned file-by-file.)
         variant_hf_repos = {
             "base": [
-                "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                 "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+                "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
             ],
             "customvoice": [
-                "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
                 "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
             ],
             "voicedesign": [
                 "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
             ],
         }[want_variant]
+        # NO SIZE FALLBACK: an artifact locked to one size CANNOT
+        # render on the other (the talker cat would die mid-graph) —
+        # an empty list makes the resolver return None and the
+        # loader's loud "download the matching dir" error names it.
+        if want_size:
+            variant_hf_repos = [
+                r for r in variant_hf_repos if want_size in r
+            ]
 
         candidates: list[str] = []
         if os.path.isabs(path):
@@ -1083,19 +1131,24 @@ class Qwen3TtsEngine:
         #        <hf_root>/Qwen3-TTS-12Hz-0.6B-CustomVoice/config.json
         #   2. HF cache layout (snapshot_download):
         #        <hf_root>/models--Qwen--Qwen3-TTS-12Hz-0.6B-Base/snapshots/<hash>/config.json
-        # Try the flat layout first (fast), then snapshot_download.
+        # REPO ORDER DOMINATES LAYOUT (2026-09-22, the measured
+        # catch): the original two-pass shape (all flat dirs first,
+        # then all snapshots) let a SMALLER flat dir beat a LARGER
+        # snapshot — the 1.7B-Base landed via snapshot_download and
+        # the resolver still loaded the 0.6B-Base flat dir. Each repo
+        # now checks flat THEN snapshot before yielding to the next.
         hf_root = roots[1]
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            snapshot_download = None
         for repo_id in variant_hf_repos:
             short = repo_id.split("/")[-1]
             flat = os.path.join(hf_root, short)
             if os.path.isfile(os.path.join(flat, "config.json")):
                 return flat
-
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError:
-            return None
-        for repo_id in variant_hf_repos:
+            if snapshot_download is None:
+                continue
             try:
                 resolved = snapshot_download(
                     repo_id=repo_id,
