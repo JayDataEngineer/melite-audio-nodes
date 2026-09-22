@@ -1028,16 +1028,24 @@ class MeliteAudioDuck:
                                         "tooltip": "semicolon list of start:end second spans, e.g. '1.0:2.5;4.0:5.0'"}),
                 "gain_db": ("FLOAT", {"default": -14.0, "min": -60.0, "max": 0.0, "step": 0.5}),
                 "ramp_ms": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 500.0, "step": 1.0}),
+                # THE SLOW RELEASE (operator catch c, 2026-09-22: "during
+                # dialogue the music gets quiet, then gets loud again") —
+                # one 20ms edge on BOTH sides snapped the bed back like a
+                # gate. A duck attacks fast, RELEASES slow (the console
+                # law): ramp_ms owns the dip's edge, release_ms owns the
+                # return (350ms default reads as breathe-in, not pop).
+                "release_ms": ("FLOAT", {"default": 350.0, "min": 0.0, "max": 2000.0, "step": 10.0}),
             },
         }
 
-    def duck_audio(self, audio: dict, segments: str, gain_db: float, ramp_ms: float):
+    def duck_audio(self, audio: dict, segments: str, gain_db: float, ramp_ms: float, release_ms: float):
         wf = audio["waveform"]
         sr = int(audio["sample_rate"])
         gain = 10.0 ** (gain_db / 20.0)
         n = int(wf.shape[-1])
         env = torch.ones(n, dtype=wf.dtype)
         ramp = max(1, int(round(ramp_ms / 1000.0 * sr)))
+        release = max(1, int(round(release_ms / 1000.0 * sr)))
         for seg in (segments or "").split(";"):
             seg = seg.strip()
             if seg == "":
@@ -1056,15 +1064,31 @@ class MeliteAudioDuck:
                 continue
             env[ia:ib] = gain
             # linear ramps at the edges (inside the span, never outside)
-            ra = min(ramp, (ib - ia) // 2)
+            # attack (ramp_ms) owns the head INSIDE the span; release
+            # (release_ms, slow) owns the tail — the release may be
+            # LONGER than the span's own tail room, in which case it
+            # spills past ib (the recover arc bleeds outside the span
+            # by design: a fade-back is not attenuation of the
+            # dialogue, it is the music's own breath)
+            ra = min(ramp, ib - ia)
+            rr = min(release, max(0, n - ib) + (ib - ia) // 2)
             if ra > 0:
-                # the ramp lives INSIDE the span: 1.0 -> gain at the
-                # head, gain -> 1.0 at the tail (never a click, never
-                # attenuation bleeding outside the span)
                 left = torch.linspace(1.0, gain, ra, dtype=wf.dtype)
-                right = torch.linspace(gain, 1.0, ra, dtype=wf.dtype)
                 env[ia:ia + ra] = left
-                env[ib - ra:ib] = right
+            if rr > 0:
+                right = torch.linspace(gain, 1.0, rr, dtype=wf.dtype)
+                # write the release arc where it fits: inside the span's
+                # tail first, then past ib — composited so an overlapping
+                # next span's gain floor is never lifted by the previous
+                # release (env keeps the MINIMUM of what's written)
+                tail_in = min(rr, (ib - ia) - ra)
+                if tail_in > 0:
+                    seg = env[ia + ra:ia + ra + tail_in]
+                    env[ia + ra:ia + ra + tail_in] = torch.minimum(seg, right[rr - tail_in:])
+                spill = min(rr - tail_in, n - ib)
+                if spill > 0:
+                    seg = env[ib:ib + spill]
+                    env[ib:ib + spill] = torch.minimum(seg, right[:spill])
         env = env.reshape(1, 1, n)
         return ({"waveform": wf * env, "sample_rate": sr},)
 
