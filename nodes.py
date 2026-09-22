@@ -812,14 +812,39 @@ try:
 except ImportError:  # standalone tooling/tests, never inside ComfyUI
     folder_paths = None
 
+try:
+    import av
+except ImportError:  # standalone tooling/tests never decode files
+    av = None
 
-def torchaudio_load_audio(path: str):
-    """Load a file as (waveform[1, C, N], sample_rate) — ComfyUI's
-    AUDIO dict convention (torchaudio.load + the batch dim)."""
-    import torchaudio
 
-    waveform, sample_rate = torchaudio.load(path)
-    return waveform.unsqueeze(0), int(sample_rate)
+def load_audio_file(path: str):
+    """Decode an audio file as (waveform[1, C, N], sample_rate) — the
+    AUDIO dict convention, decoded by core LoadAudio's own PyAV law
+    (torchaudio.load needs TorchCodec, which this venv does not ship;
+    the torchaudio loader died at execution on every bed slice)."""
+    if av is None:
+        raise RuntimeError("melite-audio-nodes: PyAV (av) is required to decode audio files")
+    with av.open(path) as af:
+        if not af.streams.audio:
+            raise ValueError("No audio stream found in the file.")
+        stream = af.streams.audio[0]
+        sample_rate = int(stream.codec_context.sample_rate)
+        n_channels = stream.channels
+        frames = []
+        for frame in af.decode(streams=stream.index):
+            buf = torch.from_numpy(frame.to_ndarray())
+            if buf.shape[0] != n_channels:
+                buf = buf.view(-1, n_channels).t()
+            frames.append(buf)
+        if not frames:
+            raise ValueError("No audio frames decoded.")
+        wav = torch.cat(frames, dim=1)
+        if wav.dtype == torch.int16:
+            wav = wav.float() / (2 ** 15)
+        elif wav.dtype == torch.int32:
+            wav = wav.float() / (2 ** 31)
+        return wav.unsqueeze(0), sample_rate
 
 
 class MeliteAudioSlice:
@@ -832,7 +857,22 @@ class MeliteAudioSlice:
 
     @classmethod
     def INPUT_TYPES(cls):
-        audio_files = folder_paths.get_filename_list("audio") if folder_paths is not None else []
+        # THE INPUT-DIR LAW (fixed 2026-09-21): this ComfyUI build has
+        # NO 'audio' folder category — folder_paths.get_filename_list
+        # ("audio") raises KeyError, which 500'd object_info and killed
+        # EVERY graph carrying this node at validation (the audio bed
+        # included — dead at submit, silently). Core LoadAudio's own
+        # law lists the INPUT DIRECTORY filtered by content type;
+        # this node mirrors it exactly (the staged bed/clip filenames
+        # live there).
+        if folder_paths is None:
+            audio_files: list = []
+        else:
+            input_dir = folder_paths.get_input_directory()
+            os.makedirs(input_dir, exist_ok=True)
+            audio_files = sorted(
+                folder_paths.filter_files_content_types(os.listdir(input_dir), ["audio", "video"])
+            )
         return {
             "required": {
                 "audio": (audio_files, {"audio upload": "audio"}),
@@ -847,7 +887,7 @@ class MeliteAudioSlice:
         if duration_seconds <= 0:
             raise ValueError("MeliteAudioSlice: duration_seconds must be positive")
         path = folder_paths.get_annotated_filepath(audio)
-        waveform, sample_rate = torchaudio_load_audio(path)
+        waveform, sample_rate = load_audio_file(path)
         # sample-grain slice (never a resample): start lands on the
         # nearest sample at the SOURCE's own rate
         expected = int(round(duration_seconds * sample_rate))
@@ -861,6 +901,174 @@ class MeliteAudioSlice:
         return ({"waveform": cut, "sample_rate": sample_rate},)
 
 
+# ── MeliteAudioDelay + MeliteAudioMix (the clips-stitch engine half,
+# 2026-09-21 — the restore of the h3-timeline Music row's lost
+# consumer). Positioned dialogue/music clips must land in the RENDERED
+# film, mixed over the final cut at film time, seamless across window
+# seams (the old cc_stage_audio_clips/ffmpeg_concat amix, reborn
+# in-graph per the engine law — never a harness-side ffmpeg). Delay
+# places one clip (head silence at the source's own rate + an exact
+# total-duration fit); Mix sums the film track with each placed clip
+# (clip resampled to the base rate, shorter side zero-padded, output
+# clamped to [-1,1] like every AUDIO producer in this pack).
+
+
+class MeliteAudioDelay:
+    """Place one clip on the film timeline: pad silence at the head,
+    fit the total to duration_seconds (trim or silence-pad)."""
+
+    CATEGORY = "audio/melite"
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "delay_audio"
+    DESCRIPTION = "Delay an AUDIO stream by delay_seconds (head silence, sample-grain at the source rate) and fit the total to duration_seconds exactly (trim tail / pad silence)."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "delay_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.001}),
+                "duration_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.001,
+                                               "tooltip": "Exact total length (delay + clip). 0 = no fit (delay + the clip's own length)."}),
+            },
+        }
+
+    def delay_audio(self, audio: dict, delay_seconds: float, duration_seconds: float):
+        wf = audio["waveform"]
+        sr = int(audio["sample_rate"])
+        if delay_seconds < 0:
+            delay_seconds = 0.0
+        pad_samples = int(round(delay_seconds * sr))
+        head = torch.zeros(wf.shape[0], wf.shape[1], pad_samples, dtype=wf.dtype)
+        out = torch.cat([head, wf], dim=-1)
+        if duration_seconds > 0:
+            expected = int(round(duration_seconds * sr))
+            if out.shape[-1] > expected:
+                out = out[..., :expected]
+            elif out.shape[-1] < expected:
+                out = torch.nn.functional.pad(out, (0, expected - int(out.shape[-1])))
+        return ({"waveform": out, "sample_rate": sr},)
+
+
+class MeliteAudioMix:
+    """Sum two AUDIO streams (the film track + one placed clip).
+
+    audio2 (the clip) is resampled to audio1's (the base's) rate when
+    they differ; the shorter side is zero-padded to the longer; the
+    sum clamps to [-1,1] (the same convention as every AUDIO producer
+    in this pack). length_mode 'base' truncates to the BASE length
+    (a clip overhanging the film's end never extends the cut);
+    'longest' keeps the longer.
+    """
+
+    CATEGORY = "audio/melite"
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "mix_audio"
+    DESCRIPTION = "Mix two AUDIO streams: clip resampled to the base rate, zero-pad to length, sum, clamp. length_mode 'base' never extends the film."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio1": ("AUDIO",),
+                "audio2": ("AUDIO",),
+                "length_mode": (["base", "longest"], {"default": "base"}),
+            },
+        }
+
+    def mix_audio(self, audio1: dict, audio2: dict, length_mode: str):
+        wf1, sr1 = audio1["waveform"], int(audio1["sample_rate"])
+        wf2, sr2 = audio2["waveform"], int(audio2["sample_rate"])
+        if sr1 != sr2:
+            import torchaudio.functional as AF
+            wf2 = AF.resample(wf2, orig_freq=sr2, new_freq=sr1)
+        # channel-count match: mono/stereo mismatch broadcasts the mono
+        # side by repeating channels (never a silent drop)
+        if wf1.shape[1] != wf2.shape[1]:
+            if wf1.shape[1] == 1:
+                wf1 = wf1.repeat(1, wf2.shape[1], 1)
+            elif wf2.shape[1] == 1:
+                wf2 = wf2.repeat(1, wf1.shape[1], 1)
+            else:
+                c = min(wf1.shape[1], wf2.shape[1])
+                wf1, wf2 = wf1[:, :c, :], wf2[:, :c, :]
+        target = max(int(wf1.shape[-1]), int(wf2.shape[-1]))
+        if length_mode == "base":
+            target = int(wf1.shape[-1])
+        if int(wf1.shape[-1]) < target:
+            wf1 = torch.nn.functional.pad(wf1, (0, target - int(wf1.shape[-1])))
+        if int(wf2.shape[-1]) < target:
+            wf2 = torch.nn.functional.pad(wf2, (0, target - int(wf2.shape[-1])))
+        mixed = (wf1[..., :target] + wf2[..., :target]).clamp(-1.0, 1.0)
+        return ({"waveform": mixed, "sample_rate": sr1},)
+
+
+class MeliteAudioDuck:
+    """Duck (attenuate) an AUDIO stream during time spans.
+
+    The film's generated voice must yield to a dialogue clip the
+    model was conditioned on (else both speak). segments is a
+    semicolon list of `start:end` seconds in the AUDIO's own
+    timeline; each span drops to gain_db with linear ramps of
+    ramp_ms at the edges. Baseline outside spans is unity — the
+    film's own sound is untouched where no clip speaks.
+    """
+
+    CATEGORY = "audio/melite"
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "duck_audio"
+    DESCRIPTION = "Attenuate an AUDIO stream during `start:end;start:end` second spans (gain_db, linear ramp_ms edges). The generated track yields to conditioned dialogue clips."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "segments": ("STRING", {"default": "", "multiline": False,
+                                        "tooltip": "semicolon list of start:end second spans, e.g. '1.0:2.5;4.0:5.0'"}),
+                "gain_db": ("FLOAT", {"default": -14.0, "min": -60.0, "max": 0.0, "step": 0.5}),
+                "ramp_ms": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 500.0, "step": 1.0}),
+            },
+        }
+
+    def duck_audio(self, audio: dict, segments: str, gain_db: float, ramp_ms: float):
+        wf = audio["waveform"]
+        sr = int(audio["sample_rate"])
+        gain = 10.0 ** (gain_db / 20.0)
+        n = int(wf.shape[-1])
+        env = torch.ones(n, dtype=wf.dtype)
+        ramp = max(1, int(round(ramp_ms / 1000.0 * sr)))
+        for seg in (segments or "").split(";"):
+            seg = seg.strip()
+            if seg == "":
+                continue
+            parts = seg.split(":")
+            if len(parts) != 2:
+                raise RuntimeError(f"MeliteAudioDuck: bad segment '{seg}' — want 'start:end' seconds")
+            try:
+                a, b = float(parts[0]), float(parts[1])
+            except ValueError:
+                raise RuntimeError(f"MeliteAudioDuck: bad segment '{seg}' — want numeric seconds")
+            if b <= a:
+                continue
+            ia, ib = max(0, int(round(a * sr))), min(n, int(round(b * sr)))
+            if ib <= ia:
+                continue
+            env[ia:ib] = gain
+            # linear ramps at the edges (inside the span, never outside)
+            ra = min(ramp, (ib - ia) // 2)
+            if ra > 0:
+                # the ramp lives INSIDE the span: 1.0 -> gain at the
+                # head, gain -> 1.0 at the tail (never a click, never
+                # attenuation bleeding outside the span)
+                left = torch.linspace(1.0, gain, ra, dtype=wf.dtype)
+                right = torch.linspace(gain, 1.0, ra, dtype=wf.dtype)
+                env[ia:ia + ra] = left
+                env[ib - ra:ib] = right
+        env = env.reshape(1, 1, n)
+        return ({"waveform": wf * env, "sample_rate": sr},)
+
+
 # ── Mappings ─────────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
@@ -872,6 +1080,9 @@ NODE_CLASS_MAPPINGS = {
     "UnloadAudiocoreModel": UnloadAudiocoreModel,
     "AudiocoreFamilyInfo": AudiocoreFamilyInfo,
     "MeliteAudioSlice": MeliteAudioSlice,
+    "MeliteAudioDelay": MeliteAudioDelay,
+    "MeliteAudioMix": MeliteAudioMix,
+    "MeliteAudioDuck": MeliteAudioDuck,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -883,4 +1094,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnloadAudiocoreModel": "Unload Audiocore Model",
     "AudiocoreFamilyInfo": "Audiocore Family Info",
     "MeliteAudioSlice": "Melite Audio Slice",
+    "MeliteAudioDelay": "Melite Audio Delay",
+    "MeliteAudioMix": "Melite Audio Mix",
+    "MeliteAudioDuck": "Melite Audio Duck",
 }
