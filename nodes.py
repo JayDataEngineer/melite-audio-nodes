@@ -1062,33 +1062,41 @@ class MeliteAudioDuck:
             ia, ib = max(0, int(round(a * sr))), min(n, int(round(b * sr)))
             if ib <= ia:
                 continue
-            env[ia:ib] = gain
-            # linear ramps at the edges (inside the span, never outside)
-            # attack (ramp_ms) owns the head INSIDE the span; release
-            # (release_ms, slow) owns the tail — the release may be
-            # LONGER than the span's own tail room, in which case it
-            # spills past ib (the recover arc bleeds outside the span
-            # by design: a fade-back is not attenuation of the
-            # dialogue, it is the music's own breath)
+            # THE PER-SPAN LOCAL ENVELOPE (the 2026-09-22 cure): the
+            # first release_ms implementation wrote arcs directly
+            # into the shared env with minimum() compositing — but
+            # minimum() against the span's own gain floor makes the
+            # release arc a SILENT NO-OP (minimum keeps the floor;
+            # the film measured a 9.8dB pop at the span end because
+            # no release ever landed). Correct construction: each
+            # span builds its OWN envelope (attack → floor → release
+            # arc), and the shared env is the minimum ACROSS spans —
+            # a release lifts toward unity exactly where no other
+            # span still holds the floor, and overlaps keep the
+            # union floor by construction.
             ra = min(ramp, ib - ia)
             rr = min(release, max(0, n - ib) + (ib - ia) // 2)
+            local = torch.ones(n, dtype=wf.dtype)
+            local[ia:ib] = gain
             if ra > 0:
-                left = torch.linspace(1.0, gain, ra, dtype=wf.dtype)
-                env[ia:ia + ra] = left
+                local[ia:ia + ra] = torch.linspace(1.0, gain, ra, dtype=wf.dtype)
             if rr > 0:
                 right = torch.linspace(gain, 1.0, rr, dtype=wf.dtype)
-                # write the release arc where it fits: inside the span's
-                # tail first, then past ib — composited so an overlapping
-                # next span's gain floor is never lifted by the previous
-                # release (env keeps the MINIMUM of what's written)
+                # the arc is ONE continuous ramp of length rr that
+                # begins tail_in samples before ib and (when the
+                # span's tail room was too short) continues past ib
+                # — value reaches unity only at the arc's true end,
+                # so the inside and spill slices are consecutive
+                # windows of `right`, never overlapping ends (the
+                # spill slice is right[tail_in:…], continuing from
+                # where the inside slice right[:tail_in] stopped)
                 tail_in = min(rr, (ib - ia) - ra)
                 if tail_in > 0:
-                    seg = env[ia + ra:ia + ra + tail_in]
-                    env[ia + ra:ia + ra + tail_in] = torch.minimum(seg, right[rr - tail_in:])
+                    local[ib - tail_in:ib] = right[:tail_in]
                 spill = min(rr - tail_in, n - ib)
                 if spill > 0:
-                    seg = env[ib:ib + spill]
-                    env[ib:ib + spill] = torch.minimum(seg, right[:spill])
+                    local[ib:ib + spill] = right[tail_in:tail_in + spill]
+            torch.minimum(env, local, out=env)
         env = env.reshape(1, 1, n)
         return ({"waveform": wf * env, "sample_rate": sr},)
 
