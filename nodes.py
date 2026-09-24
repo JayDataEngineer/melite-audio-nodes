@@ -153,15 +153,73 @@ _DEFAULT_MODEL_DIR = {
 }
 
 
-def _list_audiocore_models() -> list[str]:
+_WEIGHT_FILE_NAMES = ("model.safetensors", "model_index.json")
+_WEIGHT_FILE_SUFFIXES = (".gguf",)
+# Walk bound: the provisioning tree nests at most a few levels (the
+# HF cache layout is <name>/snapshots/<hash>/); unbounded recursion
+# over a shared models mount is a boot-time hazard.
+_MAX_WALK_DEPTH = 5
+
+
+def _dir_holds_weights(abs_dir: str) -> bool:
     try:
-        entries = sorted(os.listdir(_AUDIOCPP_MODELS_DIR))
-        return [
-            e for e in entries
-            if os.path.isdir(os.path.join(_AUDIOCPP_MODELS_DIR, e))
-        ]
+        names = os.listdir(abs_dir)
+    except OSError:
+        return False
+    for n in names:
+        if n in _WEIGHT_FILE_NAMES:
+            return True
+        if n.endswith(_WEIGHT_FILE_SUFFIXES):
+            return True
+    return False
+
+
+# Support artifacts, never lane addresses: the speech tokenizer rides
+# INSIDE its model dir (its own weight files make it a false choice),
+# and blobs/ are the HF cache's raw internals.
+_SKIP_DIR_NAMES = {"speech_tokenizer", "blobs", "refs", "__pycache__"}
+
+
+def _list_audiocore_models() -> list[str]:
+    """The combo enum serves the REAL provisioning tree (2026-09-24,
+    transcript-015): top-level dirs stay choices (legacy behavior —
+    container dirs like qwen3-tts/ ride even without direct weights),
+    and every nested dir that DIRECTLY holds weights is a choice too —
+    the HF cache layout (<root>/<name>/snapshots/<hash>/model.safetensors)
+    is how the qwen3-tts lanes ship. Before this, ComfyUI's combo
+    validation refused every nested lane address at /prompt (400)
+    even though _resolve_model_path would have joined it fine."""
+    found: list[str] = []
+    root = _AUDIOCPP_MODELS_DIR
+
+    def walk(rel: str, depth: int) -> None:
+        abs_dir = os.path.join(root, rel) if rel else root
+        try:
+            entries = sorted(os.listdir(abs_dir))
+        except OSError:
+            return
+        for e in entries:
+            if e in _SKIP_DIR_NAMES:
+                continue
+            rel_child = f"{rel}/{e}" if rel else e
+            abs_child = os.path.join(root, rel_child)
+            if not os.path.isdir(abs_child):
+                continue
+            # Top-level dirs are choices regardless (kept: the legacy
+            # enum + container dirs); a nested dir is a choice only
+            # when it DIRECTLY holds weights.
+            if not rel or _dir_holds_weights(abs_child):
+                found.append(rel_child)
+            # Nested dirs recurse whether or not they hold weights
+            # directly (their children may — the snapshot layout).
+            if depth < _MAX_WALK_DEPTH:
+                walk(rel_child, depth + 1)
+
+    try:
+        walk("", 0)
     except OSError:
         return []
+    return sorted(set(found))
 
 
 def _resolve_model_path(model_path: str) -> str:
