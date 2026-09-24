@@ -451,6 +451,15 @@ class AudiocoreTTS:
             call_kwargs["voice_file"] = _resolve_input_path(
                 call_kwargs["voice_file"])
 
+        # "none" = NO preset speaker (operator 2026-09-24): the card offers
+        # it so a CustomVoice run doesn't force a default timbre (Ryan/
+        # Vivian/…). Normalized to EMPTY here — the engine boundary — so
+        # the identity comes from whatever actually rides (a .qvoice via
+        # VoiceStudio's torch path), or the engine refuses loud when
+        # nothing does. Never a silent fallback to a preset.
+        if call_kwargs.get("voice") == "none":
+            call_kwargs["voice"] = ""
+
         # ── Voice file loading + PCA steering ──
         voice_file = call_kwargs.pop("voice_file", "")
         pca_json = call_kwargs.pop("voice_pca_strengths", "")
