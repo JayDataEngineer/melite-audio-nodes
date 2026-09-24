@@ -78,6 +78,40 @@ _DIR_SCAN_FAMILIES = ("moss_sfx_v2",)
 # every consumer below degrades gracefully (spec={}, model_spec=None).
 _AUDIOCPP_MODEL_SPECS = os.environ.get("AUDIOCPP_MODEL_SPECS_DIR", "")
 
+# Spec discovery walk (transcript-016, 2026-09-24): the C++ loader's
+# discover_external_model_spec checks <model_path>/model_specs/<family>.json,
+# <model_path>/../model_specs/<family>.json, then walks cwd upward — an HF
+# cache checkout (models--*/snapshots/<hash>) reaches none of those, so the
+# 1.7B snapshot lanes died at load with "install model_specs/qwen3_tts"
+# even though the family spec sits three parents up in the provisioning
+# tree (…/hf/model_specs/qwen3_tts.json). Mirror the C++ candidate walk
+# python-side over the RESOLVED model path's parents and hand the found
+# spec file to the session as model_spec_override (the loader accepts a
+# file or a directory). Bounded depth; the env override still wins.
+_SPEC_WALK_MAX_DEPTH = 6
+
+
+def _discover_model_spec(family: str, model_path: str) -> Optional[str]:
+    if _AUDIOCPP_MODEL_SPECS:
+        candidate_dir = Path(_AUDIOCPP_MODEL_SPECS)
+        if candidate_dir.is_dir():
+            return str(candidate_dir)
+        return None
+    # Path-style model inputs (a single weights file) anchor at the parent.
+    anchor = Path(model_path)
+    if anchor.suffix and not anchor.is_dir():
+        anchor = anchor.parent
+    cursor = anchor
+    for _ in range(_SPEC_WALK_MAX_DEPTH):
+        candidate = cursor / "model_specs" / f"{family}.json"
+        if candidate.is_file():
+            return str(candidate)
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    return None
+
 
 def resolve_model_folder(folder_key: str, env_name: str) -> str:
     """Resolve one of the pack's model folders DECLARATIVELY via ComfyUI's
@@ -315,7 +349,7 @@ class ManagedModel:
                     self.family, task, variant_task, self._variant,
                 )
                 task = variant_task
-            model_spec = _AUDIOCPP_MODEL_SPECS if os.path.isdir(_AUDIOCPP_MODEL_SPECS) else None
+            model_spec = _discover_model_spec(self.family, resolved_path)
 
             self._session = NativeSession(
                 registry=get_registry(),
