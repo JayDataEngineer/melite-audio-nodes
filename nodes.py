@@ -11,6 +11,9 @@ Exposes the full inference surface via NATIVE in-process loading
   - AudiocoreVoiceStudio — voice artifact authoring (uses qwen-tts Python directly)
   - MeliteAudioSlice — the audio-bed cut node (sample-grain slicing +
     silence-pad; the h3-timeline convenience layer's engine half)
+- MeliteFilmAudioMix — the valve's second arm (2026-09-24): the film's
+    post-generation audio mix (window files + positioned clips + duck
+    spans, torch only — lives in film_mix.py, registered here)
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ import numpy as np
 import torch
 
 from .core import ManagedModel, _AUDIOCPP_MODELS_DIR
+from .film_mix import MeliteFilmAudioMix
 
 logger = logging.getLogger("audiocore-nodes")
 
@@ -1196,6 +1200,7 @@ NODE_CLASS_MAPPINGS = {
     "MeliteAudioDelay": MeliteAudioDelay,
     "MeliteAudioMix": MeliteAudioMix,
     "MeliteAudioDuck": MeliteAudioDuck,
+    "MeliteFilmAudioMix": MeliteFilmAudioMix,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1210,4 +1215,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MeliteAudioDelay": "Melite Audio Delay",
     "MeliteAudioMix": "Melite Audio Mix",
     "MeliteAudioDuck": "Melite Audio Duck",
+    "MeliteFilmAudioMix": "Melite Film Audio Mix",
 }
