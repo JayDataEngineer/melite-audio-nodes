@@ -259,8 +259,12 @@ class Qwen3TtsEngine:
         top_k: int = 50,
         repetition_penalty: float = 1.05,
         seed: int = 0,
-    ) -> str:
-        """Generate a .qvoice file and return its absolute path.
+    ) -> tuple[str, list[float], int]:
+        """Generate a .qvoice file; return (absolute path, sample PCM, sr).
+
+        The PCM is the exact design sample that seeded the .qvoice —
+        the caller surfaces it as the preview audio instead of stub
+        silence (commission 032's live finding).
 
         Flow (lite):
           1. Load VoiceDesign variant.
@@ -301,7 +305,7 @@ class Qwen3TtsEngine:
 
         # Step 1: VoiceDesign → ref WAV.
         self._ensure_variant("voicedesign")
-        ref_wav_path = self._render_voicedesign_to_wav(
+        ref_wav_path, sample_pcm, sample_sr = self._render_voicedesign_to_wav(
             instruct=instruct, text=synth_text, language=language,
             gen_kwargs=gen_kwargs,
         )
@@ -335,7 +339,7 @@ class Qwen3TtsEngine:
                     "qvoice: wrote lite %s (%d bytes payload)",
                     out_path, payload_size,
                 )
-                return out_path
+                return out_path, sample_pcm, sample_sr
 
             # Step 3 (wdelta only): patch CV talker with Base weights.
             base_text_proj, base_token_embd = self._extract_base_patch_tensors()
@@ -361,7 +365,7 @@ class Qwen3TtsEngine:
                 "qvoice: wrote wdelta %s (%d bytes payload)",
                 out_path, payload_size,
             )
-            return out_path
+            return out_path, sample_pcm, sample_sr
         finally:
             # Clean up the temp ref WAV; it's only needed during export.
             try:
@@ -591,16 +595,21 @@ class Qwen3TtsEngine:
     def _render_voicedesign_to_wav(
         self, *, instruct: str, text: str, language: str,
         gen_kwargs: dict[str, Any],
-    ) -> str:
+    ) -> tuple[str, list[float], int]:
         """Run VoiceDesign generation, write the output to a temp WAV.
 
-        Returns the temp file path. The caller is responsible for unlinking.
+        Returns ``(temp_path, pcm, sample_rate)`` — the PCM rides
+        along so the export caller can surface the REAL design
+        sample as the run's preview audio (the preview flac was
+        1-sample silence, 0.000042s, while the engine had just
+        rendered the full sample — the live-lane finding of
+        commission 032). The caller owns unlinking the temp path.
         """
         audios, sr = self.model.generate_voice_design(
             text=text, language=language, instruct=instruct, **gen_kwargs,
         )
         pcm, sr = self._to_pcm(audios, sr)
-        return self._write_wav(pcm, sr)
+        return self._write_wav(pcm, sr), pcm, sr
 
     @staticmethod
     def _write_wav(pcm: list[float], sr: int) -> str:

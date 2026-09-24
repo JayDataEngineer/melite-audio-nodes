@@ -673,7 +673,7 @@ class AudiocoreVoiceStudio:
                 raise RuntimeError(
                     f"{mode}: instruct is required — describe the voice"
                 )
-            out_path = _run_with_progress(
+            out_path, sample_pcm, sample_sr = _run_with_progress(
                 lambda report: engine.export_voice(
                     name=name,
                     instruct=instruct,
@@ -688,11 +688,25 @@ class AudiocoreVoiceStudio:
                     seed=int(kw.get("seed", 0)),
                 ),
                             )
-            silence = torch.zeros(1, 1, 1, dtype=torch.float32)
+            # THE REAL DESIGN SAMPLE (commission 032's live finding,
+            # fixed 2026-09-24): the export just rendered the sample
+            # that seeded the .qvoice — return IT as the preview
+            # waveform (the old 1-sample silence stub reported
+            # 0.000042s while real audio existed). Same clamp/reshape
+            # law as the preview arm; empty PCM (a defensive engine
+            # arm) alone falls back to the stub.
+            if sample_pcm:
+                audio_np = np.clip(
+                    np.array(sample_pcm, dtype=np.float32), -1.0, 1.0,
+                )
+                waveform = torch.from_numpy(audio_np).reshape(1, 1, -1)
+            else:
+                waveform = torch.zeros(1, 1, 1, dtype=torch.float32)
+                sample_sr = 24000
             return {
                 "ui": {"qvoice_path": [out_path], "mode": [mode]},
                 "result": (
-                    {"waveform": silence, "sample_rate": 24000},
+                    {"waveform": waveform, "sample_rate": sample_sr},
                 ),
             }
 
