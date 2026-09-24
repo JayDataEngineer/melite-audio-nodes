@@ -148,7 +148,11 @@ def _parse_clips(raw: str) -> list:
         if not isinstance(row, dict):
             raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] is not an object — never a silent skip")
         src = row.get("src")
-        if not isinstance(src) or not src.strip():
+        # THE FIRST-LIVE-RUN TYPO (attempt-017, paid for live): this seat
+        # shipped `isinstance(src)` — one argument — and killed the film at
+        # node 47 with "isinstance expected 2 arguments, got 1". The type
+        # argument was always the law.
+        if not isinstance(src, str) or not src.strip():
             raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] has no src — never a silent misplacement")
         try:
             start = float(row.get("start_sec", 0.0))
