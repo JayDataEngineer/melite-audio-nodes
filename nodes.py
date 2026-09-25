@@ -30,6 +30,7 @@ import torch
 from .core import ManagedModel, _AUDIOCPP_MODELS_DIR
 from .film_mix import MeliteFilmAudioMix
 from .qvoice_copy import MeliteQVoiceCopy
+from .loudness import MeliteLoudness
 
 logger = logging.getLogger("audiocore-nodes")
 
@@ -1245,6 +1246,7 @@ NODE_CLASS_MAPPINGS = {
     "MeliteAudioDuck": MeliteAudioDuck,
     "MeliteFilmAudioMix": MeliteFilmAudioMix,
     "MeliteQVoiceCopy": MeliteQVoiceCopy,
+    "MeliteLoudness": MeliteLoudness,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1261,4 +1263,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MeliteAudioDuck": "Melite Audio Duck",
     "MeliteFilmAudioMix": "Melite Film Audio Mix",
     "MeliteQVoiceCopy": "Melite QVoice Copy",
+    "MeliteLoudness": "Melite Loudness (LUFS)",
 }

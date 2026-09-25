@@ -100,6 +100,19 @@ class MeliteQVoiceCopy:
                 "studio's audio into 'audio')"
             )
         source = max(matches, key=lambda p: os.path.getmtime(p))
+        # THE REUSE FLAG (commission 019's collision finding, the
+        # roadmap's name-freshness admission 2026-09-25): the design
+        # lane's studio ALWAYS mints a fresh export this run, and the
+        # copy runs after it on the ordering wire — so a newest-match
+        # whose mtime PREDATES this node's execution by minutes is a
+        # stale name reused from an earlier session (the studio minted
+        # nothing under this prefix, or the prefix collides across
+        # sessions). Stamped, never refused: the receipt names the
+        # fact; the card's teaching sends new characters to fresh
+        # names. (<600s window: same-graph mint + clock tolerance.)
+        import time as _time
+        mtime = os.path.getmtime(source)
+        reused_existing = (_time.time() - mtime) > 600.0
         import folder_paths
 
         out_dir = folder_paths.get_output_directory()
@@ -118,10 +131,17 @@ class MeliteQVoiceCopy:
         # harvest lands it in the run's own tree, listed in the run's
         # artifact rows like every other media.
         return {
-            "ui": {"files": [{
-                "filename": os.path.basename(source),
-                "subfolder": dest,
-                "type": "output",
-            }]},
+            "ui": {
+                "files": [{
+                    "filename": os.path.basename(source),
+                    "subfolder": dest,
+                    "type": "output",
+                }],
+                # the freshness receipt: which file won, when it was
+                # minted, and whether that mint predates this run
+                "reused_existing": reused_existing,
+                "voice_file": os.path.basename(source),
+                "voice_mtime": mtime,
+            },
             "result": (target,),
         }
