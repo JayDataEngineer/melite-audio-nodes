@@ -29,6 +29,7 @@ import torch
 
 from .core import ManagedModel, _AUDIOCPP_MODELS_DIR
 from .film_mix import MeliteFilmAudioMix
+from .qvoice_copy import MeliteQVoiceCopy
 
 logger = logging.getLogger("audiocore-nodes")
 
@@ -137,6 +138,51 @@ def _run_with_progress(fn, *, interval: float = 1.0):
     if error_box:
         raise error_box[0]
     return result_box["value"]
+
+
+def _load_progress_sender():
+    try:
+        from comfy_execution.utils import get_executing_context
+        from server import PromptServer
+
+        ctx = get_executing_context()
+        server = PromptServer.instance
+        client_id = getattr(server, "client_id", None)
+        if ctx is None or ctx.node_id is None or not client_id:
+            return None
+        node_id = ctx.node_id
+        return lambda message: server.send_progress_text(message, node_id, client_id)
+    except Exception:
+        return None
+
+
+def _run_with_load_progress(fn):
+    sender = _load_progress_sender()
+
+    def report(message):
+        if sender is None or not isinstance(message, str) or message == "":
+            return
+        try:
+            sender(message)
+        except Exception:
+            pass
+
+    result_box: dict = {}
+    error_box: list = []
+
+    def _worker() -> None:
+        try:
+            result_box["value"] = fn(report)
+        except BaseException as exc:
+            error_box.append(exc)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join()
+    if error_box:
+        raise error_box[0]
+    return result_box["value"]
+
 
 FAMILY_NAMES = {
     "moss_tts_nano": "MOSS-TTS Nano (8B, Unigram tokenizer)",
@@ -322,10 +368,7 @@ class LoadAudiocoreModel:
             except ValueError:
                 logger.warning("LoadAudiocoreModel: ignoring bad extras JSON: %s", extras)
         m = ManagedModel(family, resolved_path, extras=extras_dict)
-        # Native load: the C++ engine loads GGUFs + migrates tensors to GPU.
-        # No progress fallback (2026-08-10): the load call reports nothing, so
-        # nothing is emitted — the node's running→finished lifecycle still shows.
-        if not _run_with_progress(lambda report: m.load()):
+        if not _run_with_load_progress(lambda report: m.load(on_progress=report)):
             raise RuntimeError(f"Failed to load {family} from {resolved_path}")
         return (m,)
 
@@ -1201,6 +1244,7 @@ NODE_CLASS_MAPPINGS = {
     "MeliteAudioMix": MeliteAudioMix,
     "MeliteAudioDuck": MeliteAudioDuck,
     "MeliteFilmAudioMix": MeliteFilmAudioMix,
+    "MeliteQVoiceCopy": MeliteQVoiceCopy,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1216,4 +1260,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MeliteAudioMix": "Melite Audio Mix",
     "MeliteAudioDuck": "Melite Audio Duck",
     "MeliteFilmAudioMix": "Melite Film Audio Mix",
+    "MeliteQVoiceCopy": "Melite QVoice Copy",
 }
