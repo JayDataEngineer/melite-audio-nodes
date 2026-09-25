@@ -109,4 +109,19 @@ class MeliteQVoiceCopy:
         os.makedirs(target_dir, exist_ok=True)
         target = os.path.join(target_dir, os.path.basename(source))
         shutil.copyfile(source, target)
-        return (target,)
+        # THE SAVE-NODE RESULT SHAPE (attempt-020 finding): the estate
+        # harvests artifacts from the history UI dict (files/audio/
+        # video/... rows fetched via /view) — a bare tuple return is
+        # invisible to it, so the copy sat unfetched in the engine's
+        # output tree. Ride the SaveAudio convention: a "files" UI
+        # row names the copy by (filename, subfolder, type) and the
+        # harvest lands it in the run's own tree, listed in the run's
+        # artifact rows like every other media.
+        return {
+            "ui": {"files": [{
+                "filename": os.path.basename(source),
+                "subfolder": dest,
+                "type": "output",
+            }]},
+            "result": (target,),
+        }
