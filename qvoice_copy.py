@@ -47,8 +47,8 @@ class MeliteQVoiceCopy:
             },
             "optional": {
                 "voices_root": ("STRING", {
-                    "default": DEFAULT_VOICES_ROOT,
-                    "tooltip": "The engine-side voices mount (override for nonstandard engines)",
+                    "default": "",
+                    "tooltip": "Engine-side voices mount override. EMPTY = the documented root (/mnt/data/models/audio/voices) resolved at RUN time — an empty default is deliberate: a directory path defaultled into the graph is unrepresentable to the source-echo guard (attempt-018's finding: the whole design lane refused), so the fallback lives in the node, never in the graph",
                 }),
             },
         }
