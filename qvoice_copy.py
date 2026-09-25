@@ -57,6 +57,13 @@ class MeliteQVoiceCopy:
     RETURN_NAMES = ("saved_path",)
     FUNCTION = "copy_qvoice"
     CATEGORY = "melite/audio"
+    # THE ORPHAN LAW (attempt-019 finding, engine source read): ComfyUI
+    # executes only the OUTPUT-REACHABLE subgraph — validate_prompt walks
+    # output nodes' dependencies, and an unconsumed node never enters
+    # the execution list. The copy IS a save node, so it takes the
+    # SaveAudio/SaveVideo shape: OUTPUT_NODE roots the walk and the
+    # node always runs.
+    OUTPUT_NODE = True
     TITLE = "Melite QVoice Copy (voice persists in the run tree)"
 
     def copy_qvoice(self, voice_name, dest_prefix, audio, voices_root=DEFAULT_VOICES_ROOT):
