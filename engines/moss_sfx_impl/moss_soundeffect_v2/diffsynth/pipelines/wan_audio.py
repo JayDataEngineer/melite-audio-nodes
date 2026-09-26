@@ -2,7 +2,7 @@ import torch, warnings, glob, os, types, math, json
 import numpy as np
 from PIL import Image
 from einops import repeat, reduce
-from typing import Optional, Union, Literal
+from typing import Callable, Optional, Union, Literal
 from dataclasses import dataclass
 from einops import rearrange
 import numpy as np
@@ -192,6 +192,7 @@ class WanAudioPipeline(BasePipeline):
         model_dir: str,
         device: Union[str, torch.device] = "cuda",
         torch_dtype: torch.dtype = torch.bfloat16,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> "WanAudioPipeline":
         """Load a WanAudioPipeline from a HuggingFace-format directory.
 
@@ -205,6 +206,8 @@ class WanAudioPipeline(BasePipeline):
                 tokenizer/...
                 vae/vae_128d_48k.pth    (or diffusion_pytorch_model.safetensors)
         """
+        if on_progress is not None:
+            on_progress("loading pipeline metadata")
         with open(os.path.join(model_dir, "model_index.json")) as f:
             index = json.load(f)
         print(f"Loading from: {model_dir}")
@@ -217,18 +220,24 @@ class WanAudioPipeline(BasePipeline):
 
         te_path = os.path.join(model_dir, "text_encoder")
         print(f"  Loading text_encoder from {te_path} ...")
+        if on_progress is not None:
+            on_progress("loading text encoder")
         text_encoder = Qwen3TextEncoder(te_path, torch_dtype=torch_dtype)
         text_encoder = text_encoder.to(device)
         print(f"  text_encoder: dim={text_encoder.dim}")
 
         tok_path = os.path.join(model_dir, "tokenizer")
         print(f"  Loading tokenizer from {tok_path} ...")
+        if on_progress is not None:
+            on_progress("loading tokenizer")
         prompter = WanPrompter(tokenizer_path=tok_path)
         prompter.fetch_models(text_encoder)
 
         vae_dir = os.path.join(model_dir, "vae")
         vae_pth = os.path.join(vae_dir, "vae_128d_48k.pth")
         vae_safetensors = os.path.join(vae_dir, "diffusion_pytorch_model.safetensors")
+        if on_progress is not None:
+            on_progress("loading DAC VAE")
         if os.path.exists(vae_pth):
             print(f"  Loading DAC VAE from {vae_pth} ...")
             vae = DAC.load(vae_pth)
@@ -240,6 +249,8 @@ class WanAudioPipeline(BasePipeline):
 
         dit_weights_path = os.path.join(model_dir, "transformer", "diffusion_pytorch_model.safetensors")
         print(f"  Loading DiT from {dit_weights_path} ...")
+        if on_progress is not None:
+            on_progress("loading DiT weights")
         diffusers_sd = load_file(dit_weights_path)
         custom_sd = _convert_hf_dit_state_dict(diffusers_sd)
 
@@ -273,6 +284,8 @@ class WanAudioPipeline(BasePipeline):
         dit = dit.to(device=device, dtype=torch_dtype)
         dit.freqs_cis_0, dit.freqs_cis_1, dit.freqs_cis_2 = rope_freqs
 
+        if on_progress is not None:
+            on_progress("assembling pipeline")
         pipe = cls(
             device=device,
             torch_dtype=torch_dtype,
@@ -287,6 +300,8 @@ class WanAudioPipeline(BasePipeline):
         pipe.dit_variant = index.get("dit_variant")
         pipe.to(device)
         print(f"  Pipeline assembled on {device}")
+        if on_progress is not None:
+            on_progress("pipeline assembled")
         return pipe
 
 

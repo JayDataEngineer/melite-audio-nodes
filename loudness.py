@@ -179,19 +179,40 @@ class MeliteLoudness:
                 "meters real waveforms, never guesses at encoded containers"
             )
         track = waveform.detach().cpu().to(torch.float64)
-        # ComfyUI AUDIO dicts may ride (samples,) mono or (channels, samples)
+        # ComfyUI AUDIO dicts may ride (samples,) mono, (channels,
+        # samples), or BATCHED (1, channels, samples) — MeliteFilmAudioMix
+        # emits the batched 3-D shape (run-a248c5614633 receipt,
+        # 2026-09-25: (1, 2, 324000)). A singleton leading dim is the
+        # batch; a 3-D with channels > 1 up front is not a batch and
+        # stays refused (metering garbage silently is the alternative).
         if track.dim() == 1:
             track = track.unsqueeze(0)
+        if track.dim() == 3 and track.shape[0] == 1:
+            track = track.squeeze(0)
+        if track.dim() != 2:
+            raise RuntimeError(
+                "MeliteLoudness: empty or non-2D track (shape=%s) — "
+                "refusing to meter garbage" % (tuple(track.shape),)
+            )
+        if track.shape[-1] == 0 or track.shape[0] == 0:
+            raise RuntimeError(
+                "MeliteLoudness: empty or non-2D track (shape=%s) — "
+                "refusing to meter garbage" % (tuple(track.shape),)
+            )
         lufs = integrated_loudness(track, sr)
         peak = float(track.abs().max())
         peak_db = 20.0 * math.log10(peak + 1e-12)
         if not math.isfinite(lufs) or not math.isfinite(peak_db):
             raise RuntimeError("MeliteLoudness: non-finite reading — loud out")
+        # THE UI LIST LAW (run-a248c5614633 receipt, 2026-09-25):
+        # ComfyUI's ui merge extends LIST values (the SaveAudio
+        # convention); scalar values raise TypeError and kill the whole
+        # prompt — every ui entry rides as a one-element list.
         return {
             "ui": {
-                "loudness_lufs": lufs,
-                "peak_db": peak_db,
-                "sample_rate": sr,
+                "loudness_lufs": [float(lufs)],
+                "peak_db": [float(peak_db)],
+                "sample_rate": [sr],
             },
             "result": (audio,),
         }

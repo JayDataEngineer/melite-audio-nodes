@@ -4,7 +4,7 @@ import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 from tqdm import tqdm
@@ -109,16 +109,22 @@ class MossSoundEffectPipeline(torch.nn.Module):
         pretrained_model_name_or_path: Union[str, os.PathLike],
         torch_dtype: torch.dtype = torch.bfloat16,
         device: Union[str, torch.device] = "cuda",
+        on_progress: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> "MossSoundEffectPipeline":
         """Load a pipeline from a local diffusers-style dir or a HF hub repo id."""
         model_dir = Path(cls._resolve_local_dir(pretrained_model_name_or_path, kwargs))
         resolved_device = cls._normalize_device(device)
 
+        load_options = {
+            "device": resolved_device,
+            "torch_dtype": torch_dtype,
+        }
+        if on_progress is not None:
+            load_options["on_progress"] = on_progress
         engine = WanAudioPipeline.from_pretrained(
             str(model_dir),
-            device=resolved_device,
-            torch_dtype=torch_dtype,
+            **load_options,
         )
 
         sample_rate = 48000
@@ -130,11 +136,14 @@ class MossSoundEffectPipeline(torch.nn.Module):
             sample_rate = int(index.get("sample_rate", sample_rate))
             max_inference_seconds = int(index.get("max_inference_seconds", max_inference_seconds))
 
-        return cls(
+        pipeline = cls(
             engine=engine,
             sample_rate=sample_rate,
             max_inference_seconds=max_inference_seconds,
         )
+        if on_progress is not None:
+            on_progress("pipeline ready")
+        return pipeline
 
     @staticmethod
     def _resolve_local_dir(

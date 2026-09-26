@@ -291,7 +291,11 @@ class ManagedModel:
         )
         self._loaded_model_wrapper: AudiocoreLoadedModel | None = None
 
-    def load(self, **extras: Any) -> bool:
+    def load(
+        self,
+        on_progress: Optional[Callable[[str], None]] = None,
+        **extras: Any,
+    ) -> bool:
         """Load the model into GPU memory.
 
         moss_sfx_v2 runs the pure-torch diffusion pipeline (TTS-Audio-Suite
@@ -306,7 +310,7 @@ class ManagedModel:
         if self._torch_engine is not None:
             return True
         if self.family == "moss_sfx_v2":
-            return self._load_torch()
+            return self._load_torch(on_progress=on_progress)
         if self._session is not None:
             return True
 
@@ -374,7 +378,10 @@ class ManagedModel:
             self._session = None
             return False
 
-    def _load_torch(self) -> bool:
+    def _load_torch(
+        self,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> bool:
         """Load moss_sfx_v2 via the pure-torch diffusion pipeline.
 
         The HF checkpoint is identified by model_index.json. GGUF dirs are
@@ -414,7 +421,12 @@ class ManagedModel:
             from .engines.moss_sfx_v2 import TorchSfxEngine
 
             engine = TorchSfxEngine(self.path)
-            if not engine.load():
+            loaded = (
+                engine.load()
+                if on_progress is None
+                else engine.load(on_progress=on_progress)
+            )
+            if not loaded:
                 return False
             self._torch_engine = engine
             ManagedModel._active_model = self

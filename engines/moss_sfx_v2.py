@@ -94,7 +94,10 @@ class TorchSfxEngine:
 
     # ── Load ─────────────────────────────────────────────────────────────
 
-    def load(self) -> bool:
+    def load(
+        self,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> bool:
         """Load the pipeline from the HF checkpoint dir (lazy, once)."""
         if self.pipeline is not None:
             return True
@@ -105,11 +108,16 @@ class TorchSfxEngine:
 
             print("🔄 Loading MOSS-SFX v2 (torch pipeline)", flush=True)
             t0 = time.perf_counter()
+            load_options = {
+                "device": "cuda",
+                "torch_dtype": torch.bfloat16,
+                "local_files_only": True,
+            }
+            if on_progress is not None:
+                load_options["on_progress"] = on_progress
             self.pipeline = MossSoundEffectPipeline.from_pretrained(
                 self.model_path,
-                device="cuda",
-                torch_dtype=torch.bfloat16,
-                local_files_only=True,
+                **load_options,
             )
             print(
                 f"✅ MOSS-SFX v2 loaded in {time.perf_counter() - t0:.1f}s",
