@@ -117,8 +117,42 @@ def _resolve_output_prefix(prefix: str) -> str:
     return max(matches, key=counter_of)
 
 
+def _clip_candidate_trees() -> list:
+    """THE §23 CROSS-ROOTS WALK (roadmap 2026-09-26 — the documented
+    URL form, resolved): the estate serves run artifacts at
+    ``/v1/assets/runs/<run>/<rel>`` (compose door) and
+    ``/melite-media/runs/<run>/<rel>`` (browser route). A clip src in
+    either spelling names a file under a state root's ``output/``
+    tree. The trees, first-wins (the same order every estate door
+    searches — own root first, colon-separated MELITE_STATE_ROOTS
+    extras after):
+
+    - ``$MELITE_STATE_ROOT/output`` when the env names the root;
+    - every ``$MELITE_STATE_ROOTS`` extra's ``output/``;
+    - the standard-install derivation: an engine living at
+      ``<state>/runtime/comfyui`` has its runs root at
+      ``<state>/runs/output`` (the estate's default layout — this
+      derivation only ever ADDS a candidate; a miss refuses loud, so
+      it can never smuggle a wrong file).
+    """
+    trees: list = []
+    env_root = os.environ.get("MELITE_STATE_ROOT", "").strip()
+    if env_root:
+        trees.append(os.path.join(env_root, "output"))
+    for extra in os.environ.get("MELITE_STATE_ROOTS", "").split(":"):
+        extra = extra.strip()
+        if extra:
+            trees.append(os.path.join(extra, "output"))
+    cwd = os.getcwd()
+    if os.path.basename(cwd) == "comfyui":
+        trees.append(os.path.join(os.path.dirname(os.path.dirname(cwd)), "runs", "output"))
+    seen = set()
+    return [t for t in trees if not (t in seen or seen.add(t))]
+
+
 def _resolve_clip_source(src: str) -> str:
-    """A clips_json src → a decodable path (staged name, then absolute)."""
+    """A clips_json src → a decodable path (staged name, then the
+    estate's asset-URL form, then absolute)."""
     if folder_paths is None:
         raise RuntimeError("MeliteFilmAudioMix requires ComfyUI (folder_paths)")
     try:
@@ -127,11 +161,38 @@ def _resolve_clip_source(src: str) -> str:
         staged = None
     if staged is not None and os.path.isfile(staged):
         return staged
+    # THE ASSET-URL ARM (2026-09-26): the h3 tool description
+    # advertises ``/v1/assets/runs/<run>/<rel>`` FIRST — resolve it
+    # against the state trees instead of dying with a form the docs
+    # told the author to use. Layer A's submit-time walk already
+    # stages these URLs into input-dir names; this arm is the defense
+    # for any src that reached the graph raw (a hand-composed graph,
+    # or a future seat that skips the walk).
+    for prefix in ("/v1/assets/runs/", "/melite-media/runs/"):
+        if src.startswith(prefix):
+            rel = src[len(prefix):]
+            if ".." in rel.split("/"):
+                raise RuntimeError(
+                    f"MeliteFilmAudioMix: clip source {src!r} refuses traversal"
+                )
+            trees = _clip_candidate_trees()
+            for tree in trees:
+                cand = os.path.join(tree, rel)
+                if os.path.isfile(cand):
+                    return cand
+            searched = "; ".join(trees) if trees else "no state root known (set MELITE_STATE_ROOT)"
+            raise RuntimeError(
+                f"MeliteFilmAudioMix: clip source {src!r} resolves to no "
+                f"file under the estate's runs trees (searched: {searched}) "
+                f"— the upstream output is unreachable; re-run the producer "
+                f"card, or pass the staged input name / an absolute path"
+            )
     if os.path.isabs(src) and os.path.isfile(src):
         return src
     raise RuntimeError(
         f"MeliteFilmAudioMix: clip source {src!r} resolves to no file "
-        f"(staged input-dir name or absolute path — never a guess)"
+        f"(staged input-dir name, estate asset URL, or absolute path — "
+        f"never a guess)"
     )
 
 

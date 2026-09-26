@@ -138,10 +138,14 @@ class MeliteQVoiceCopy:
                     "type": "output",
                 }],
                 # the freshness receipt: which file won, when it was
-                # minted, and whether that mint predates this run
-                "reused_existing": reused_existing,
-                "voice_file": os.path.basename(source),
-                "voice_mtime": mtime,
+                # minted, and whether that mint predates this run.
+                # THE UI LIST LAW (run-a248c5614633 receipt, 2026-09-25):
+                # ComfyUI's ui merge extends LIST values — scalars raise
+                # TypeError and kill the whole prompt (the live kill this
+                # node's scalar receipt caused). Every entry a 1-list.
+                "reused_existing": [bool(reused_existing)],
+                "voice_file": [os.path.basename(source)],
+                "voice_mtime": [mtime],
             },
             "result": (target,),
         }
