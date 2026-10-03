@@ -1,0 +1,20 @@
+# melite-audio-nodes — deps BEYOND the engine base env
+# (comfyui's own requirements + torch). Manager reads this file on
+# install (the git-url door runs it) — a fresh machine converges.
+#
+# The optional GPU wheels (flash-attn, flash_attn_interface,
+# sageattention, xfuser) are GUARDED imports: absent wheels degrade
+# to torch attention paths, so they are deliberately NOT pinned
+# here — install them deliberately on the hardware that wants them.
+av
+descript-audiotools
+diffusers
+einops
+ftfy
+pydantic
+qwen-tts==0.1.1
+regex
+torchaudio
+tqdm
+transformers
+typing_extensions
