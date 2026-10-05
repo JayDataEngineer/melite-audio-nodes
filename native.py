@@ -22,20 +22,31 @@ logger = logging.getLogger("audiocore-nodes")
 
 # ─── Library discovery ────────────────────────────────────────────────────
 
-_FORK_BUILD = Path.home() / "Documents/programs/vendor/my-stuff/audiocpp-fork/build/bin"
+# The estate door's landing: `pnpm run provision -- sync` in the melite
+# repo fetches + sha-verifies the pinned release asset
+# (libaudiocore-3938031, github.com/JayDataEngineer/audio.cpp) into
+# <melite>/data/runtime/audiocore/. Under the managed runtime the engine
+# runs at <melite>/data/runtime/comfyui, so from custom_nodes/<pack>/
+# the landing is three parents up, one sibling over. Packs installed
+# outside that layout have no sibling — None, not a crash.
+_ESTATE_RUNTIME = (
+    Path(__file__).resolve().parents[3] / "audiocore"
+    if len(Path(__file__).resolve().parents) > 3 else None
+)
 
 
 def _find_native_lib() -> str:
     """Resolve the path to libaudiocore_native.so."""
-    # 1. Explicit env var
+    # 1. Explicit env var — the estate boot line exports it
+    #    (provision boot-cmd prints AUDIOCORE_NATIVE_LIB=<landing>)
     env_path = os.environ.get("AUDIOCORE_NATIVE_LIB")
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    # 2. The fork's build output
+    # 2. The estate provision landing + a conventional host install
     candidates = [
-        _FORK_BUILD / "libaudiocore_native.so",
-        Path("/opt/audiocpp/lib/libaudiocore_native.so"),
+        *([] if _ESTATE_RUNTIME is None
+           else [_ESTATE_RUNTIME / "libaudiocore_native.so"]),
         Path("/usr/local/lib/libaudiocore_native.so"),
     ]
     for p in candidates:
@@ -43,12 +54,14 @@ def _find_native_lib() -> str:
             return str(p)
 
     raise RuntimeError(
-        "libaudiocore_native.so not found. Build it with:\n"
-        "  cd vendor/my-stuff/audiocpp-fork && mkdir -p build && cd build\n"
-        "  cmake .. -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=ON\n"
-        "  cmake --build . --target audiocore_native -j$(nproc)\n"
-        f"Checked: {[str(c) for c in candidates]}\n"
-        f"Or set AUDIOCORE_NATIVE_LIB to the .so path."
+        "libaudiocore_native.so not found. The estate installs it:\n"
+        "  pnpm run provision -- sync\n"
+        "(fetches + sha-verifies the pinned asset libaudiocore-3938031 from\n"
+        " github.com/JayDataEngineer/audio.cpp into data/runtime/audiocore/),\n"
+        "then boot the engine through the estate (provision boot-cmd) — the\n"
+        "boot line exports AUDIOCORE_NATIVE_LIB pointing at the landing. Or\n"
+        "set AUDIOCORE_NATIVE_LIB yourself to a .so you built.\n"
+        f"Checked: env AUDIOCORE_NATIVE_LIB, {[str(c) for c in candidates]}"
     )
 
 
