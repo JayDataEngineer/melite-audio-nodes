@@ -1,6 +1,12 @@
-# melite-audio-nodes — deps BEYOND the engine base env
+# melite-audio/tts/sfx-nodes — deps BEYOND the engine base env
 # (comfyui's own requirements + torch). Manager reads this file on
 # install (the git-url door runs it) — a fresh machine converges.
+#
+# THE ENGINE-TREE LAW (2026-10-13): every pack carries every
+# dispatcher-reached engine file, so every pack declares every
+# family's deps — the pack that wins the custom_nodes race must be
+# able to load whichever family the graph addresses. This file is
+# byte-identical across the three packs and the repo wall pins it.
 #
 # The optional GPU wheels (flash-attn, flash_attn_interface,
 # sageattention, xfuser) are GUARDED imports: absent wheels degrade
