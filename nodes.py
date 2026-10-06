@@ -329,7 +329,24 @@ class LoadAudiocoreModel:
     @classmethod
     def INPUT_TYPES(cls):
         models = _list_audiocore_models()
-        default_family = "moss_tts_nano"
+        # THE DEFAULT PAIR IS ONE CHOICE (the audio re-audit's F4,
+        # 2026-10-13): family and model_path must agree. The old code
+        # pinned moss_tts_nano, found this machine's enum lacks its
+        # moss-tts dir, and silently fell to models[0] — an SFX tree
+        # under a TTS family. The pair is now derived together: the
+        # first family whose declared default dir the provisioning
+        # tree actually serves. A family whose dir is absent is never
+        # the DEFAULT on that machine (the operator can still select
+        # it; its loads then refuse loud at the engine — never a
+        # wrong-tree silent run). When no declared dir is served at
+        # all, the first family stands with its own declared dir;
+        # ComfyUI shows the enum's first member for an absent
+        # default — a state the estate's manifest prevents by
+        # provisioning every required family's default dir.
+        default_family = next(
+            (f for f in FAMILY_NAMES if _DEFAULT_MODEL_DIR.get(f) in models),
+            next(iter(FAMILY_NAMES)),
+        )
         default_model = _DEFAULT_MODEL_DIR.get(default_family, "")
         if default_model not in models and models:
             default_model = models[0]
