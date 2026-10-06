@@ -1,24 +1,18 @@
-"""Family engine registry — all families dispatched through audiocpp-fork HTTP.
+"""Family engines — the modules core.py dispatches into by direct import.
 
-No per-family Python engines are registered for inference. All inference
-goes through the audiocpp_server subprocess managed by core.py.
+The registry that once lived here (get_engine_class/python_families,
+always returning nothing) is deleted: no caller existed, and its
+docstring claimed all inference rode the audiocpp_server subprocess
+— false since the moss_sfx_v2 cure (core.py imports
+engines.moss_sfx_v2 directly and loads a pure in-process torch
+pipeline; only the qwen3_tts voice-design path speaks HTTP to the
+server). The modules:
 
-The qwen3_tts engine class is kept on disk (engines/qwen3_tts.py) for the
-Voice Studio node (AudiocoreVoiceStudio), which needs the qwen-tts Python
-package for voice export/preview. It is NOT registered here — Voice Studio
-imports it directly.
+- engines/qwen3_tts.py — the qwen-tts Python package seat: the
+  VoiceStudio node imports it for voice export/preview, and the
+  voice-design pipeline drives it.
+- engines/moss_sfx_v2.py — the MOSS-SFX v2 torch engine
+  (core.py's dispatch target for family moss_sfx_v2).
+- engines/moss_sfx_impl/ — the vendored upstream implementation
+  tree moss_sfx_v2 loads through.
 """
-from __future__ import annotations
-from typing import Any
-
-
-# No Python engines registered — all inference goes through audiocpp-fork HTTP.
-_ENGINES: dict[str, str] = {}
-
-
-def get_engine_class(family: str) -> Any | None:
-    return None
-
-
-def python_families() -> set[str]:
-    return set()

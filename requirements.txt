@@ -8,6 +8,13 @@
 # able to load whichever family the graph addresses. This file is
 # byte-identical across the three packs and the repo wall pins it.
 #
+# VERSION PINS (2026-10-13, round 4): transformers==4.57.3 is the
+# version the estate's live venv runs (the qwen3-tts voice-design
+# lane was verified against it; an unpinned float can pull a
+# transformers whose qwen-tts adapter surface moved). huggingface_hub
+# is held <1.0 for the same reason — the 1.x line removes APIs the
+# snapshot-download paths use. Everything else floats within the
+# engine base env's already-solved set.
 # The optional GPU wheels (flash-attn, flash_attn_interface,
 # sageattention, xfuser) are GUARDED imports: absent wheels degrade
 # to torch attention paths, so they are deliberately NOT pinned
@@ -17,10 +24,11 @@ descript-audiotools
 diffusers
 einops
 ftfy
+huggingface_hub<1.0
 pydantic
 qwen-tts==0.1.1
 regex
 torchaudio
 tqdm
-transformers
+transformers==4.57.3
 typing_extensions

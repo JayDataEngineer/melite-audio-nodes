@@ -247,17 +247,27 @@ def _list_audiocore_models() -> list[str]:
     it. Only containers (no direct weights) open. This is what keeps
     a lane's own parts (model_specs/, anything content-identical to
     a lane) out of the enum without a name list, and it bounds junk
-    the old union walk offered. Symlinked dirs ride and open like
-    real dirs (the engine tree legitimately links lanes into the
-    store; WHERE weights live is the provisioning law's question,
-    not the enum's) — but a link may never re-enter a dir the walk
-    already holds open: the realpath guard prunes cycles, so a
-    self-referential link can never grow the enum or hang the walk
-    (the depth bound remains the backstop)."""
+    the old union walk offered.
+
+    THE ROOT CONFINEMENT + THE ALIAS LAW (2026-10-13, round 4): a
+    symlink may NAME weights anywhere (top-level store links are how
+    the engine tree mounts lanes), but opening — recursion — stays
+    inside the models root's own real tree: a link outside the root
+    rides as an address and never grafts the foreign filesystem
+    onto the enum (a link to / is one member, not a walk of /). And
+    a real container opens ONCE: the first spelling to reach it
+    walks its lanes; every alias of it rides as an address but never
+    re-walks the same weights. Riding is by SPELLING — two names
+    for one weights dir are two combo addresses, and the resolver
+    accepts both — while opening is by REALPATH, so cycles die (a
+    dir never re-enters itself) and aliases cannot multiply the
+    enum's nested members."""
     found: list[str] = []
     root = _AUDIOCPP_MODELS_DIR
+    real_root = os.path.realpath(root)
+    seen: set[str] = {real_root}
 
-    def walk(rel: str, depth: int, open_real: frozenset[str]) -> None:
+    def walk(rel: str, depth: int) -> None:
         abs_dir = os.path.join(root, rel) if rel else root
         try:
             entries = sorted(os.listdir(abs_dir))
@@ -271,8 +281,6 @@ def _list_audiocore_models() -> list[str]:
             if not os.path.isdir(abs_child):
                 continue
             real_child = os.path.realpath(abs_child)
-            if real_child in open_real:
-                continue
             holds = _dir_holds_weights(abs_child)
             # Top-level dirs are choices regardless (kept: the legacy
             # enum + container dirs + the family default); a nested
@@ -283,14 +291,23 @@ def _list_audiocore_models() -> list[str]:
             # listing guard ride the SAME constant).
             if not rel or (holds and depth + 1 <= _MAX_WALK_DEPTH):
                 found.append(rel_child)
-            # THE STRUCTURAL STOP: only containers open — recursion
-            # rides the snapshot layout (<name>/snapshots/<hash>),
-            # never an accepted lane's own parts.
+            # THE STRUCTURAL STOP + THE ROOT CONFINEMENT + THE ALIAS
+            # LAW: only containers open, only inside the root's real
+            # tree, and only the first spelling of a real dir — a
+            # weights leaf never opens (its parts are not lanes), a
+            # link outside the root never opens (an address, not a
+            # graft), and a dir already walked never walks again.
             if not holds and depth < _MAX_WALK_DEPTH:
-                walk(rel_child, depth + 1, open_real | {real_child})
+                confined = (
+                    real_child == real_root
+                    or real_child.startswith(real_root + os.sep)
+                )
+                if confined and real_child not in seen:
+                    seen.add(real_child)
+                    walk(rel_child, depth + 1)
 
     try:
-        walk("", 0, frozenset({os.path.realpath(root)}))
+        walk("", 0)
     except OSError:
         return []
     return sorted(set(found))
@@ -408,7 +425,10 @@ class LoadAudiocoreModel:
                 logger.warning("LoadAudiocoreModel: ignoring bad extras JSON: %s", extras)
         m = ManagedModel(family, resolved_path, extras=extras_dict)
         if not _run_with_load_progress(lambda report: m.load(on_progress=report)):
-            raise RuntimeError(f"Failed to load {family} from {resolved_path}")
+            # The failure reason rides the raise (the log alone hid it
+            # from the operator's traceback — round 4 R7).
+            reason = f": {m.last_error}" if getattr(m, "last_error", None) else ""
+            raise RuntimeError(f"Failed to load {family} from {resolved_path}{reason}")
         return (m,)
 
 

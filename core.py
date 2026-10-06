@@ -286,6 +286,10 @@ class ManagedModel:
         # Exactly one of _session / _torch_engine is set, decided by family
         # + checkpoint format in load().
         self._torch_engine: Any = None
+        # The last load failure's reason: the raise sites surface it
+        # (a bare RuntimeError with the cause only in the log is the
+        # round-4 diagnosability gap).
+        self.last_error: str | None = None
         self._estimated_vram: int = _FAMILY_VRAM_ESTIMATE.get(
             family, 4 * 1024 * 1024 * 1024,
         )
@@ -375,6 +379,7 @@ class ManagedModel:
             return True
         except (NativeError, Exception) as e:
             logger.error("load failed for %s: %s", self.family, e)
+            self.last_error = str(e)
             self._session = None
             return False
 
@@ -439,6 +444,7 @@ class ManagedModel:
             raise
         except Exception as e:
             logger.error("torch load failed for %s: %s", self.family, e)
+            self.last_error = str(e)
             self._torch_engine = None
             return False
 
@@ -853,3 +859,39 @@ def _noop_real_model(*args: Any, **kwargs: Any) -> Any:
     on our wrapper. The native session manages its own lifecycle.
     """
     return None
+
+
+def _patch_cleanup_models_gc() -> None:
+    """Evict stale LoadedModel entries on every engine GC pass.
+
+    The audiocore models are plain torch/ctypes objects outside
+    ComfyUI's loaded-model bookkeeping, so a stale LoadedModel entry
+    pins weights the enum evicted; chaining cleanup_models() onto
+    cleanup_models_gc() clears them. The wrap is MARKED — each of
+    the three packs imports its own copy of this module, and the
+    patch must apply exactly once however many copies load. The
+    audiocore pack's __init__ carried this unguarded (and alone) —
+    round 4 R8: a load-time side effect must not depend on which
+    pack's __init__ the deployment loads.
+    """
+    try:
+        from comfy import model_management
+    except ImportError:
+        return  # standalone/test: no engine to patch
+    if getattr(model_management.cleanup_models_gc, "_audiocore_patched", False):
+        return
+    original_gc = model_management.cleanup_models_gc
+
+    def _patched_gc() -> None:
+        original_gc()
+        try:
+            model_management.cleanup_models()
+        except Exception:
+            pass
+
+    _patched_gc._audiocore_patched = True  # type: ignore[attr-defined]
+    model_management.cleanup_models_gc = _patched_gc
+
+
+# Applied at import from every pack's copy, marked so it lands once.
+_patch_cleanup_models_gc()

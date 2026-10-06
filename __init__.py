@@ -1,8 +1,12 @@
-"""audiocpp-fork — ComfyUI custom nodes for the audiocpp-fork C++ audio engine.
+"""melite-audio-nodes — the audio-core ComfyUI pack (all families).
 
-All inference runs NATIVELY IN-PROCESS via libaudiocore_native.so (ctypes).
-No HTTP server, no subprocess — the engine_runtime shared library is loaded
-directly into the Python process, exactly like every other ComfyUI model.
+Inference seats per family (the engines/ docstring carries the full
+law): the C++-engine families load in-process through the native
+ctypes binding, moss_sfx_v2 loads a pure torch pipeline
+(engines/moss_sfx_v2.py), and the qwen3_tts voice-design path rides
+the qwen-tts Python package. Engine-GC hygiene (stale LoadedModel
+eviction) is applied by core.py at import — shared law, not this
+pack's private side effect.
 
 Families: moss_tts, qwen3_tts, ace_step, moss_sfx_v2
 
@@ -23,33 +27,10 @@ that is neither declared nor overridden fails loud at import):
 """
 from __future__ import annotations
 
-import logging
-
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 # No WEB_DIRECTORY: this pack ships no JS extensions (the ./web dir the old
 # declaration pointed at never existed).
 
-logger = logging.getLogger("audiocore-nodes")
 
-
-def _patch_cleanup_models_gc():
-    """Patch cleanup_models_gc to also evict stale LoadedModel entries."""
-    try:
-        from comfy import model_management
-        _original = model_management.cleanup_models_gc
-
-        def _patched():
-            _original()
-            try:
-                model_management.cleanup_models()
-            except Exception:
-                pass
-
-        model_management.cleanup_models_gc = _patched
-    except (ImportError, AttributeError):
-        pass
-
-
-_patch_cleanup_models_gc()
