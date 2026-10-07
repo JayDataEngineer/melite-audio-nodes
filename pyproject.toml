@@ -2,8 +2,33 @@
 name = "melite-audio-nodes"
 version = "0.1.0"
 description = "Melite Audio (Audiocore TTS/SFX/Music) — a Melite first-party ComfyUI extension pack"
-
 # Version display + package identity for ComfyUI-Manager (it reads
-# this for its version column). Runtime dependencies live in
-# requirements.txt — the file Manager pip-installs on the git-url
-# door; duplicating them here would drift (audit, 2026-10-13).
+# this for its version column). Dependencies live in BOTH files by
+# one law: requirements.txt is what Manager pip-installs on the
+# git-url door, [project].dependencies is what the Comfy registry
+# action installs at publish — the estate's pack-parity wall pins
+# the two doors read the same set (registry door, 2026-10-18).
+license = {file = "LICENSE"}
+dependencies = [
+    "av",
+    "descript-audiotools",
+    "diffusers",
+    "einops",
+    "ftfy",
+    "huggingface_hub<1.0",
+    "pydantic",
+    "qwen-tts==0.1.1",
+    "regex",
+    "torchaudio",
+    "tqdm",
+    "transformers==4.57.3",
+    "typing_extensions"
+]
+
+[project.urls]
+Repository = "https://github.com/JayDataEngineer/melite-audio-nodes"
+
+[tool.comfy]
+PublisherId = "data-engineer"
+DisplayName = "Melite Audio Nodes"
+Icon = ""
