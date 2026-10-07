@@ -22,13 +22,13 @@ logger = logging.getLogger("audiocore-nodes")
 
 # ─── Library discovery ────────────────────────────────────────────────────
 
-# The estate door's landing: `pnpm run provision -- sync` in the melite
-# repo fetches + sha-verifies the pinned release asset
-# (libaudiocore-3938031, github.com/JayDataEngineer/audio.cpp) into
-# <melite>/data/runtime/audiocore/. Under the managed runtime the engine
-# runs at <melite>/data/runtime/comfyui, so from custom_nodes/<pack>/
-# the landing is three parents up, one sibling over. Packs installed
-# outside that layout have no sibling — None, not a crash.
+# The estate's managed runtime also lands the asset (its provision
+# sync fetches the same pinned release into
+# <melite>/data/runtime/audiocore/, a sibling of the engine tree at
+# <melite>/data/runtime/comfyui), so from custom_nodes/<pack>/ that
+# landing is three parents up, one sibling over. Packs installed
+# outside that layout have no sibling — None, not a crash. The pack's
+# own native/ landing (install.py's fetch) is checked before this.
 _ESTATE_RUNTIME = (
     Path(__file__).resolve().parents[3] / "audiocore"
     if len(Path(__file__).resolve().parents) > 3 else None
@@ -37,13 +37,20 @@ _ESTATE_RUNTIME = (
 
 def _find_native_lib() -> str:
     """Resolve the path to libaudiocore_native.so."""
-    # 1. Explicit env var — the estate boot line exports it
-    #    (provision boot-cmd prints AUDIOCORE_NATIVE_LIB=<landing>)
+    # 1. Explicit env var — an operator-built .so overrides everything
     env_path = os.environ.get("AUDIOCORE_NATIVE_LIB")
     if env_path and os.path.isfile(env_path):
         return env_path
 
-    # 2. The estate provision landing + a conventional host install
+    # 2. The pack's own install.py landing — Manager runs it on
+    #    install; it fetches + sha-verifies the pinned release asset
+    #    into this pack's native/ directory. A plain ComfyUI with
+    #    this pack Manager-installed converges here, estate or not.
+    pack_local = Path(__file__).resolve().parent / "native" / "libaudiocore_native.so"
+    if pack_local.is_file():
+        return str(pack_local)
+
+    # 3. The estate provision landing + a conventional host install
     candidates = [
         *([] if _ESTATE_RUNTIME is None
            else [_ESTATE_RUNTIME / "libaudiocore_native.so"]),
@@ -54,14 +61,10 @@ def _find_native_lib() -> str:
             return str(p)
 
     raise RuntimeError(
-        "libaudiocore_native.so not found. The estate installs it:\n"
-        "  pnpm run provision -- sync\n"
-        "(fetches + sha-verifies the pinned asset libaudiocore-3938031 from\n"
-        " github.com/JayDataEngineer/audio.cpp into data/runtime/audiocore/),\n"
-        "then boot the engine through the estate (provision boot-cmd) — the\n"
-        "boot line exports AUDIOCORE_NATIVE_LIB pointing at the landing. Or\n"
-        "set AUDIOCORE_NATIVE_LIB yourself to a .so you built.\n"
-        f"Checked: env AUDIOCORE_NATIVE_LIB, {[str(c) for c in candidates]}"
+        "libaudiocore_native.so not found. The pack's install.py fetches\n"
+        "it (re-run the ComfyUI-Manager install), or set\n"
+        "AUDIOCORE_NATIVE_LIB to a .so you built.\n"
+        f"Checked: env AUDIOCORE_NATIVE_LIB, {pack_local}, {[str(c) for c in candidates]}"
     )
 
 
