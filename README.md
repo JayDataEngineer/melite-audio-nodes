@@ -16,12 +16,13 @@ audiocpp-fork — ComfyUI custom nodes for the audiocpp-fork C++ audio engine.
 
 ## Install
 
-```bash
-cd /path/to/ComfyUI/custom_nodes
-git clone https://github.com/JayDataEngineer/melite-audio-nodes.git
-```
-
-Restart ComfyUI.
+Install through ComfyUI-Manager (git URL
+`https://github.com/JayDataEngineer/melite-audio-nodes`). Manager
+runs `install.py`, which fetches + sha-verifies the pinned native
+library release asset (`libaudiocore-3938031`) into this pack's
+`native/` dir — no estate tooling, no environment variables,
+nothing external. A manual clone converges the same way by running
+`python install.py`, then restart ComfyUI.
 
 ## Provenance
 
