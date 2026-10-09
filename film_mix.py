@@ -53,7 +53,13 @@ card composed (the submit-time upload walk stages data:/asset URLs to
 input-dir names) or an absolute path; resolution is
 get_annotated_filepath first, absolute-path fallback second, loud
 refusal otherwise. Bad JSON / bad rows refuse loud (never a silent
-misplacement).
+misplacement). A raw /v1/assets/runs or /melite-media/runs src that
+skipped the walk resolves against the estate's runs trees, named by
+the state_roots input FIRST (a JSON array of absolute state roots —
+Layer A's submit-time walk stamps it from the estate's roots
+manifest), then this process's MELITE_STATE_ROOT(S) env (the
+operator's own engine env — never the estate's), then the
+standard-install derivation.
 
 TWO HONEST DIVERGENCES from the retired tail (both improvements, both
 loud by construction):
@@ -117,18 +123,24 @@ def _resolve_output_prefix(prefix: str) -> str:
     return max(matches, key=counter_of)
 
 
-def _clip_candidate_trees() -> list:
+def _clip_candidate_trees(state_roots: str = "") -> list:
     """THE §23 CROSS-ROOTS WALK (roadmap 2026-09-26 — the documented
     URL form, resolved): the estate serves run artifacts at
     ``/v1/assets/runs/<run>/<rel>`` (compose door) and
     ``/melite-media/runs/<run>/<rel>`` (browser route). A clip src in
     either spelling names a file under a state root's ``output/``
-    tree. The trees, first-wins (the same order every estate door
-    searches — own root first, colon-separated MELITE_STATE_ROOTS
-    extras after):
+    tree. The trees, first-wins:
 
-    - ``$MELITE_STATE_ROOT/output`` when the env names the root;
-    - every ``$MELITE_STATE_ROOTS`` extra's ``output/``;
+    - the ``state_roots`` node input's roots (J12's Layer C arm,
+      2026-10-19: a JSON array of absolute state roots Layer A's
+      submit-time walk stamps from the estate's roots manifest —
+      call data, the same order every estate door searches, own root
+      first);
+    - ``$MELITE_STATE_ROOT/output`` when this process's env names
+      the root, then every ``$MELITE_STATE_ROOTS`` extra's
+      ``output/`` (the operator's engine env — the estate retired
+      its own export, so on a lawful lane these arms only fire when
+      the OPERATOR named them);
     - the standard-install derivation: an engine living at
       ``<state>/runtime/comfyui`` has its runs root at
       ``<state>/runs/output`` (the estate's default layout — this
@@ -136,6 +148,8 @@ def _clip_candidate_trees() -> list:
       it can never smuggle a wrong file).
     """
     trees: list = []
+    for root in _parse_state_roots(state_roots):
+        trees.append(os.path.join(root, "output"))
     env_root = os.environ.get("MELITE_STATE_ROOT", "").strip()
     if env_root:
         trees.append(os.path.join(env_root, "output"))
@@ -150,7 +164,35 @@ def _clip_candidate_trees() -> list:
     return [t for t in trees if not (t in seen or seen.add(t))]
 
 
-def _resolve_clip_source(src: str) -> str:
+def _parse_state_roots(state_roots: str) -> list:
+    """The state_roots node input → a list of absolute state roots.
+
+    Empty input → []. A JSON array of strings is the stamped form;
+    anything else refuses loud (never a silent fallthrough to the
+    env arms — a malformed stamp is a bug to surface, not a tree to
+    skip).
+    """
+    text = (state_roots or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError(
+            f"MeliteFilmAudioMix: state_roots is not JSON ({e}) — "
+            f"Layer A's walk stamps a JSON array of absolute roots"
+        )
+    if not isinstance(parsed, list) or not all(
+        isinstance(r, str) and r.strip() for r in parsed
+    ):
+        raise RuntimeError(
+            "MeliteFilmAudioMix: state_roots must be a JSON array of "
+            "non-empty absolute root strings"
+        )
+    return [r.strip() for r in parsed]
+
+
+def _resolve_clip_source(src: str, state_roots: str = "") -> str:
     """A clips_json src → a decodable path (staged name, then the
     estate's asset-URL form, then absolute)."""
     if folder_paths is None:
@@ -175,12 +217,15 @@ def _resolve_clip_source(src: str) -> str:
                 raise RuntimeError(
                     f"MeliteFilmAudioMix: clip source {src!r} refuses traversal"
                 )
-            trees = _clip_candidate_trees()
+            trees = _clip_candidate_trees(state_roots)
             for tree in trees:
                 cand = os.path.join(tree, rel)
                 if os.path.isfile(cand):
                     return cand
-            searched = "; ".join(trees) if trees else "no state root known (set MELITE_STATE_ROOT)"
+            searched = "; ".join(trees) if trees else (
+                "no state root known — the state_roots node input is "
+                "unstamped and this engine's env names no root"
+            )
             raise RuntimeError(
                 f"MeliteFilmAudioMix: clip source {src!r} resolves to no "
                 f"file under the estate's runs trees (searched: {searched}) "
@@ -247,6 +292,13 @@ class MeliteFilmAudioMix:
     @classmethod
     def INPUT_TYPES(cls):
         return {
+            "optional": {
+                "state_roots": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": 'JSON array of absolute state roots (["/abs/root", ...]) — Layer A\'s submit-time walk stamps the estate\'s roots manifest here; the clip-source walk searches these output/ trees before any env arm',
+                }),
+            },
             "required": {
                 "videos": ("STRING", {
                     "default": "",
@@ -291,6 +343,7 @@ class MeliteFilmAudioMix:
         music_duck_spans: str,
         duck_db: float,
         film_seconds: float,
+        state_roots: str = "",
     ):
         # the engine half lives in .nodes (Delay/Mix/Duck + the PyAV
         # decode law) — imported HERE, not at module top: nodes.py
@@ -371,7 +424,7 @@ class MeliteFilmAudioMix:
         for clip in clips:
             if clip["class"] == "music":
                 continue
-            waveform, sr = load_audio_file(_resolve_clip_source(clip["src"]))
+            waveform, sr = load_audio_file(_resolve_clip_source(clip["src"], state_roots))
             loaded = {"waveform": waveform, "sample_rate": int(sr)}
             placed = delay.delay_audio(
                 loaded,
@@ -385,7 +438,7 @@ class MeliteFilmAudioMix:
         for clip in clips:
             if clip["class"] != "music":
                 continue
-            waveform, sr = load_audio_file(_resolve_clip_source(clip["src"]))
+            waveform, sr = load_audio_file(_resolve_clip_source(clip["src"], state_roots))
             loaded = {"waveform": waveform, "sample_rate": int(sr)}
             placed = delay.delay_audio(
                 loaded,
