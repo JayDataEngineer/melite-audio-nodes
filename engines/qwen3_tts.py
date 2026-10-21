@@ -1,8 +1,8 @@
-"""qwen3_tts — text-to-speech via the upstream qwen-tts Python package.
+"""qwen3_tts — text-to-speech via the faster-qwen3-tts package.
 
-Proxies the official `qwen_tts` package (pip-installed) which wraps
-Qwen3TTSForConditionalGeneration + Qwen3TTSProcessor. No GGUF, no
-conversion. The model is loaded directly from the HF source dir
+Wraps ``FasterQwen3TTS`` (pip-installed faster-qwen3-tts, torch
+backend), which itself wraps the official ``qwen_tts``
+Qwen3TTSModel. No GGUF, no conversion. The model is loaded directly from the HF source dir
 (config.json + model.safetensors + speech_tokenizer/ + tokenizer bits).
 
 Three call modes match the audiocore surface:
@@ -12,8 +12,12 @@ Three call modes match the audiocore surface:
   - design      -> generate_voice_design(text, instruct)
                    (needs a "voicedesign" model variant)
 
-Hyperparameters (temperature, top_p, top_k, repetition_penalty, seed)
-are forwarded into the underlying transformers generate() call.
+Hyperparameters (temperature, top_p, top_k, repetition_penalty) are
+forwarded to Faster's generate_* calls. ``seed`` is applied via
+torch.manual_seed only — Faster's generate_* take no seed kwarg, and
+the old qwen **kwargs path forwarded it dead into generate() anyway.
+``emotion`` is likewise NOT forwarded (no Faster/qwen param carries
+it); the wdelta preview path logs a warning when it is dropped.
 
 Voice Studio extensions (export / preview / load_qvoice) implement the
 .qvoice file format (lite + WDELTA) and the combo pipeline. See
@@ -31,9 +35,69 @@ from ..core import resolve_model_folder
 logger = logging.getLogger("audiocore.qwen3_tts")
 
 
+def _tolerant_default_rope_parameters(config, device=None, seq_len=None,
+                                      layer_type=None):
+    """RoPE init tolerant of configs without ``rope_theta`` (transformers 5.20).
+
+    qwen-tts-hf registers its own ``"default"`` RoPE initializer that reads
+    ``config.rope_theta`` unconditionally. Custom Qwen3-TTS configs carry it,
+    but the speech tokenizer's stock ``MimiConfig`` (transformers ≥5.x) keeps
+    RoPE params in ``rope_parameters`` instead — so the first weight load
+    crashes in ``initialize_weights`` with
+    ``AttributeError: 'MimiConfig' object has no attribute 'rope_theta'``.
+    That init is throwaway: qwen's ``from_pretrained`` rebuilds every
+    ``inv_freq`` buffer via ``restore_rope_buffers`` after the load. This
+    wrapper delegates to qwen's exact math for normal configs and falls back
+    to ``rope_parameters["rope_theta"]`` (else 10000.0, the transformers
+    default theta) only for configs that lack ``rope_theta`` — same shape,
+    same buffers, load proceeds to the restore.
+    """
+    from qwen_tts import _transformers_compat as _qt_compat
+    try:
+        return _qt_compat._default_rope_parameters(
+            config, device, seq_len, layer_type)
+    except AttributeError:
+        pass
+    import torch
+    base = 10000.0
+    rp = getattr(config, "rope_parameters", None)
+    if isinstance(rp, dict):
+        base = rp.get("rope_theta", 10000.0) or 10000.0
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+    head_dim = getattr(config, "head_dim", None) or (
+        config.hidden_size // config.num_attention_heads)
+    dim = int(head_dim * partial_rotary_factor)
+    inv_freq = 1.0 / (
+        base
+        ** (
+            torch.arange(0, dim, 2, dtype=torch.int64).to(
+                device=device, dtype=torch.float)
+            / dim
+        )
+    )
+    return inv_freq, 1.0
+
+
+def _ensure_rope_registry() -> None:
+    """Point the transformers RoPE registry at the tolerant initializer.
+
+    qwen_tts patches ``ROPE_INIT_FUNCTIONS["default"]`` at import with its
+    ``rope_theta``-assuming version; overwrite that entry AFTER the import
+    so Mimi-config loads (speech tokenizer, every variant) survive
+    ``initialize_weights``. Idempotent — plain dict assignment.
+    """
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+    ROPE_INIT_FUNCTIONS["default"] = _tolerant_default_rope_parameters
+
+
 # Default hyperparameters — match the audiocore node defaults where possible.
+# speaker defaults to "" (unstated): _custom_voice LOUD-refuses an empty
+# speaker on the plain-TTS path — the silent vivian fallback is dead
+# (QVOICE ARCHITECTURE LAWS). The nodes.py face maps voice="none" → ""
+# and strips "" upstream; the wdelta combo path below passes an explicit
+# speaker="vivian" (stated, not a default).
 _DEFAULTS = {
-    "speaker": "vivian",
+    "speaker": "",
     "language": "english",
     "temperature": 0.8,
     "top_p": 0.9,
@@ -43,10 +107,10 @@ _DEFAULTS = {
 
 
 class Qwen3TtsEngine:
-    """Wraps qwen_tts.Qwen3TTSModel to match audiocore's session contract."""
+    """Wraps faster_qwen3_tts.FasterQwen3TTS to match audiocore's session contract."""
 
     def __init__(self) -> None:
-        self.model: Any = None          # qwen_tts.Qwen3TTSModel
+        self.model: Any = None          # faster_qwen3_tts.FasterQwen3TTS
         self._model_dir: str | None = None
         # Variant currently loaded: "customvoice" | "base" | "voicedesign".
         # Tracked so Voice Studio preview can decide whether the active
@@ -56,13 +120,27 @@ class Qwen3TtsEngine:
 
     # ── audiocore session contract ──────────────────────────────────────
 
-    def load(self, path: str, **extras: Any) -> bool:
-        """Load Qwen3TTSModel from `path` (HF source dir with config.json).
+    @property
+    def _qwen(self) -> Any:
+        """The wrapped qwen_tts Qwen3TTSModel inside FasterQwen3TTS.
 
-        Variant selection: the qwen_tts package gates features per model
-        variant. The default load picks CustomVoice (plain TTS with
-        predefined speakers). Pass `variant='base'` via extras for voice
-        cloning, or `variant='voicedesign'` for instructed voice design.
+        QWEN_TTS-ONLY handle: used solely for the two APIs Faster does
+        not surface (``get_supported_speakers``,
+        ``create_voice_clone_prompt``) and for locating the talker
+        submodule in the WDELTA patch protocol. All synthesis rides
+        ``self.model`` (Faster). Raises while unloaded.
+        """
+        if self.model is None:
+            raise RuntimeError("qwen3_tts: engine not loaded")
+        return self.model.model
+
+    def load(self, path: str, **extras: Any) -> bool:
+        """Load FasterQwen3TTS from `path` (HF source dir with config.json).
+
+        Variant selection: features gate per model variant. The default
+        load picks CustomVoice (plain TTS with predefined speakers).
+        Pass `variant='base'` via extras for voice cloning, or
+        `variant='voicedesign'` for instructed voice design.
 
         extras (JSON object from the LoadAudiocoreModel node):
           - variant:           'customvoice' (default) | 'base' | 'voicedesign'
@@ -85,29 +163,32 @@ class Qwen3TtsEngine:
         # Track which variant was resolved so preview/export know what's live.
         self._variant = self._detect_variant_from_dir(hf_dir)
 
-        # The qwen_tts package prints a flash-attn warning to stdout on
-        # import — silence it so it doesn't pollute ComfyUI logs.
+        # Silence stdout on import (flash-attn warning) so it doesn't
+        # pollute ComfyUI logs.
         with contextlib.redirect_stdout(io.StringIO()):
             try:
-                from qwen_tts import Qwen3TTSModel
+                from faster_qwen3_tts import FasterQwen3TTS
             except ImportError as e:
                 raise RuntimeError(
-                    f"qwen3_tts: qwen-tts Python package not installed: {e}"
+                    "qwen3_tts: faster-qwen3-tts Python package not "
+                    f"installed: {e}"
                 ) from e
 
         import torch
 
-        logger.info("qwen3_tts: loading Qwen3TTSModel from %s", hf_dir)
-        self.model = Qwen3TTSModel.from_pretrained(
+        logger.info("qwen3_tts: loading FasterQwen3TTS from %s", hf_dir)
+        _ensure_rope_registry()
+        self.model = FasterQwen3TTS.from_pretrained(
             hf_dir,
+            device="cuda:0",
             dtype=torch.bfloat16,
-            device_map="cuda:0",
+            attn_implementation="sdpa",
         )
         self._model_dir = hf_dir
         logger.info(
             "qwen3_tts: model ready (device=%s, speakers=%s)",
             self.model.device,
-            (self.model.get_supported_speakers() or [])[:5],
+            (self._qwen.get_supported_speakers() or [])[:5],
         )
         return True
 
@@ -122,15 +203,16 @@ class Qwen3TtsEngine:
         if self.model is None:
             raise RuntimeError("qwen3_tts: engine not loaded")
 
-        # Pop audiocore control kwargs that don't map to qwen_tts.
+        # Pop audiocore control kwargs that don't map to generate_*.
         mode = str(kwargs.get("mode", "tts")).lower()
-        # `voice` is audiocore's speaker alias.
+        # `voice` is audiocore's speaker alias. Unstated speaker stays ""
+        # — _custom_voice refuses it LOUD (no silent preset fallback).
         speaker = str(kwargs.get("voice", kwargs.get("speaker", _DEFAULTS["speaker"])))
         language = self._coerce_language(kwargs.get("language", _DEFAULTS["language"]))
         instruct = kwargs.get("instruct", "") or ""
         seed = self._coerce_seed(kwargs.get("seed", 0))
 
-        # Build gen kwargs forwarded to transformers generate().
+        # Build gen kwargs forwarded to Faster's generate_*.
         gen_kwargs: dict[str, Any] = {}
         for k in ("temperature", "top_p", "top_k", "repetition_penalty"):
             if k in kwargs and kwargs[k] is not None and kwargs[k] != "":
@@ -138,10 +220,11 @@ class Qwen3TtsEngine:
                     gen_kwargs[k] = float(kwargs[k]) if k != "top_k" else int(kwargs[k])
                 except (TypeError, ValueError):
                     pass
+        # seed conditions torch RNG only — Faster's generate_* take no
+        # seed kwarg, so it is NEVER forwarded (would TypeError).
         if seed > 0:
             import torch
             torch.manual_seed(seed)
-            gen_kwargs["seed"] = seed
 
         # Dispatch.
         ref_audio = kwargs.get("reference_audio", "") or ""
@@ -161,9 +244,10 @@ class Qwen3TtsEngine:
     def compute_embedding(self, wav_path: str) -> list[float]:
         """Compute a speaker embedding from a WAV via the loaded model.
 
-        Uses qwen_tts' create_voice_clone_prompt to extract the x-vector
-        embedding from the reference audio. Returns it as a flat list so
-        the AudiocoreVoiceEmbedding node can cache + reuse it.
+        Uses the wrapped qwen handle's create_voice_clone_prompt to
+        extract the x-vector embedding from the reference audio. Returns
+        it as a flat list so the AudiocoreVoiceEmbedding node can cache
+        + reuse it.
         """
         if self.model is None:
             raise RuntimeError("qwen3_tts: engine not loaded")
@@ -176,7 +260,7 @@ class Qwen3TtsEngine:
         # (one per reference sample). Take the first.
         # x_vector_only_mode=True skips the in-context-learning path so we
         # don't need a ref_text transcript — we only want the x-vector.
-        prompt_items = self.model.create_voice_clone_prompt(
+        prompt_items = self._qwen.create_voice_clone_prompt(
             ref_audio=wav_path,
             ref_text=None,
             x_vector_only_mode=True,
@@ -316,7 +400,7 @@ class Qwen3TtsEngine:
             # ICL mode (x_vector_only_mode=False) requires the reference
             # transcript — and we KNOW it verbatim: the ref WAV was just
             # rendered by VoiceDesign speaking synth_text.
-            items = self.model.create_voice_clone_prompt(
+            items = self._qwen.create_voice_clone_prompt(
                 ref_audio=ref_wav_path,
                 ref_text=synth_text,
                 x_vector_only_mode=False,  # we want full ICL items (ref_code + emb)
@@ -544,7 +628,7 @@ class Qwen3TtsEngine:
         # the upstream loud ValueError (unchanged behavior, never silent).
         icl_ref_text = str(payload.get("sample_text") or "")
         if ref_audio and os.path.isfile(ref_audio):
-            items = self.model.create_voice_clone_prompt(
+            items = self._qwen.create_voice_clone_prompt(
                 ref_audio=ref_audio, ref_text=icl_ref_text or None,
                 x_vector_only_mode=False,
             )
@@ -563,7 +647,14 @@ class Qwen3TtsEngine:
         if instruct:
             gen["instruct"] = instruct
         if emotion:
-            gen["emotion"] = emotion
+            # Faster's generate_* take no emotion kwarg — drop it LOUD
+            # rather than TypeErroring the whole preview.
+            logger.warning(
+                "preview_voice: wdelta qvoice requests emotion=%r, which "
+                "the faster backend does not condition on — rendering "
+                "without it (instruct + patched talker still apply).",
+                emotion,
+            )
 
         if items:
             # Apply voice_strength to the embedding tensor.
@@ -585,8 +676,8 @@ class Qwen3TtsEngine:
                 text=text, speaker="vivian", language=lang, **gen,
             )
 
-        # Speed is applied as a post-processing step (qwen_tts doesn't
-        # expose it in generate()). We do a no-op pass for speed == 1.0.
+        # Speed is applied as a post-processing step (neither backend
+        # exposes it in generate()). We do a no-op pass for speed == 1.0.
         pcm, sr_out = self._to_pcm(audios, sr)
         if abs(speed - 1.0) > 0.001:
             pcm = self._resample_linear(pcm, speed)
@@ -646,7 +737,8 @@ class Qwen3TtsEngine:
 
         speed > 1.0 → faster (shorter). speed < 1.0 → slower (longer).
         This is a no-frills resampler — quality is acceptable for preview.
-        The final render uses qwen_tts' native rate parameter.
+        The final render uses no native rate parameter (neither backend
+        exposes one).
         """
         if not pcm or abs(speed - 1.0) < 0.001:
             return pcm
@@ -681,10 +773,14 @@ class Qwen3TtsEngine:
         import io
         import torch
         with contextlib.redirect_stdout(io.StringIO()):
-            from qwen_tts import Qwen3TTSModel
+            from faster_qwen3_tts import FasterQwen3TTS
         logger.info("qwen3_tts: loading variant=%s from %s", variant, hf_dir)
-        self.model = Qwen3TTSModel.from_pretrained(
-            hf_dir, dtype=torch.bfloat16, device_map="cuda:0",
+        _ensure_rope_registry()
+        self.model = FasterQwen3TTS.from_pretrained(
+            hf_dir,
+            device="cuda:0",
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
         )
         self._model_dir = hf_dir
         self._variant = variant
@@ -839,12 +935,12 @@ class Qwen3TtsEngine:
     def _get_talker(self) -> Any:
         """Locate the talker sub-module on the wrapped qwen_tts model.
 
-        qwen_tts.Qwen3TTSModel wraps Qwen3TTSForConditionalGeneration
-        which exposes ``.talker`` (the LM) and ``.codec`` (the audio
-        decoder). Different package versions name these differently, so
-        we probe common paths.
+        FasterQwen3TTS.model IS a qwen_tts.Qwen3TTSModel, which wraps
+        Qwen3TTSForConditionalGeneration exposing ``.talker`` (the LM)
+        and ``.codec`` (the audio decoder). Different package versions
+        name these differently, so we probe common paths.
         """
-        m = self.model
+        m = self._qwen
         # Direct attribute (newer qwen_tts).
         for attr in ("talker", "lm_model", "model"):
             sub = getattr(m, attr, None)
@@ -864,7 +960,11 @@ class Qwen3TtsEngine:
         *, temperature: float, top_p: float, top_k: int,
         repetition_penalty: float, seed: int,
     ) -> dict[str, Any]:
-        """Build the gen kwargs forwarded to qwen_tts.generate_*."""
+        """Build the gen kwargs forwarded to Faster's generate_*.
+
+        seed conditions the torch RNG only and is NEVER forwarded —
+        Faster's generate_* take no seed kwarg.
+        """
         out: dict[str, Any] = {
             "temperature": float(temperature),
             "top_p": float(top_p),
@@ -874,7 +974,6 @@ class Qwen3TtsEngine:
         if int(seed) > 0:
             import torch
             torch.manual_seed(int(seed))
-            out["seed"] = int(seed)
         return out
 
     # Alias so ManagedModel lifecycle (which calls .close() on the C++
@@ -887,7 +986,18 @@ class Qwen3TtsEngine:
     def _custom_voice(self, text: str, speaker: str, language: str,
                       instruct: str, gen_kwargs: dict[str, Any]
                       ) -> tuple[list[float], int]:
-        # The 0.6B CustomVoice model ignores instruct.
+        # Unstated speaker is a LOUD refuse — never a silent preset.
+        # (The wdelta combo path below passes speaker="vivian"
+        # explicitly; that call site owns its stated choice.)
+        if not speaker:
+            raise RuntimeError(
+                "qwen3_tts: plain TTS needs a stated speaker preset "
+                "(e.g. speaker='ryan') or a .qvoice — refusing to "
+                "render with a silent default voice."
+            )
+        # The 0.6B CustomVoice model ignores instruct (upstream's own
+        # 0b6 guard is dead code — len-4 size never in len-3 "0b6" —
+        # so we pass instruct through exactly as stated).
         audios, sr = self.model.generate_custom_voice(
             text=text,
             speaker=speaker,
@@ -980,7 +1090,7 @@ class Qwen3TtsEngine:
 
     @staticmethod
     def _to_pcm(audios: list, sr: int) -> tuple[list[float], int]:
-        """Convert qwen_tts' List[np.ndarray] → (list[float], int)."""
+        """Convert generate_*'s List[np.ndarray] → (list[float], int)."""
         import numpy as np
         if not audios:
             return [], int(sr)
@@ -1003,11 +1113,12 @@ class Qwen3TtsEngine:
 
     @staticmethod
     def _coerce_language(lang: Any) -> str:
-        """Map short codes → full names expected by qwen_tts.
+        """Map short codes → full names expected by the backend.
 
-        qwen_tts accepts: auto, chinese, english, french, german, italian,
-        japanese, korean, portuguese, russian, spanish. Map common short
-        forms; pass through unknown values (qwen_tts will validate).
+        Faster forwards language to qwen, which accepts: auto, chinese,
+        english, french, german, italian, japanese, korean, portuguese,
+        russian, spanish. Map common short forms; pass through unknown
+        values (the backend will validate).
         """
         if not lang:
             return "auto"
@@ -1030,7 +1141,8 @@ class Qwen3TtsEngine:
              — set from the `variant` key in extras JSON.
           2. Path suffix: '*-base', '*-voicedesign', '*-customvoice'.
 
-        The qwen_tts package gates features per variant:
+        The backend gates features per variant (same matrix under
+        Faster — it forwards to qwen):
           - customvoice  → generate_custom_voice (default TTS)
           - base         → generate_voice_clone + create_voice_clone_prompt
           - voicedesign  → generate_voice_design
