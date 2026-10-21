@@ -670,8 +670,9 @@ class Qwen3TtsEngine:
             )
         else:
             # No ref audio — use custom_voice with the patched talker.
-            # instruct + emotion still apply; the patched weights carry
-            # the voice identity from VoiceDesign.
+            # instruct still applies; emotion was already dropped loud
+            # above (no backend param carries it). speaker="vivian" is
+            # STATED here (the combo path owns its choice), never a default.
             audios, sr = self.model.generate_custom_voice(
                 text=text, speaker="vivian", language=lang, **gen,
             )
