@@ -8,19 +8,19 @@
 # able to load whichever family the graph addresses. This file is
 # byte-identical across the three packs and the repo wall pins it.
 #
-# VERSION PINS (2026-11-10, the py3.14 re-pin): transformers==5.1.0 +
-# huggingface_hub==1.33.0 is the proven pair on the engine's python
-# 3.14 venv. The prior pin (transformers==4.57.3, 2026-10-13 round 4)
-# is DEAD on py3.14: a fresh import cannot even construct
-# PreTrainedConfig. 5.1.0 imports BOTH engine chains clean —
-# moss_sfx_v2 and qwen3_tts, the faithful parent-package tests — and
-# the live engine venv already runs this pair (parent-cured
-# 2026-11-10). The old huggingface_hub<1.0 guard is superseded: the
-# 1.x line is what the 5.x line requires, and 1.33.0 is the version
-# the dual-chain import receipts ran. Everything else floats within
-# the engine base env's already-solved set.
-# The optional GPU wheels (flash-attn, flash_attn_interface,
-# sageattention, xfuser) are GUARDED imports: absent wheels degrade
+# VERSION PINS (2026-11-10, the faster-qwen3-tts replacement — the
+# operator's one-or-the-other ruling): faster-qwen3-tts==0.5.4 rides
+# qwen-tts-hf==0.1.1.post1 (the transformers-5 qwen_tts provider) and
+# REPLACES the plain qwen-tts==0.1.1 pin — never both in one env.
+# transformers moves 5.1.0 -> 5.20.2 (qwen-tts-hf's floor), staying on
+# the 5.x line the dual-chain receipts (moss_sfx_v2 + qwen3_tts) were
+# proven on; huggingface_hub stays 1.33.0. The prior pins:
+# transformers==4.57.3 (2026-10-13 round 4) dead on py3.14; 5.1.0 was
+# the 2026-11-10 morning re-pin until this replacement.
+# 2026-11-10 CARVE RETIREMENT: this file is no longer one of a
+# byte-identical triple — melite-sfx-nodes and melite-tts-nodes are
+# deleted; melite-audio-nodes is the ONE audio pack.
+# Everything else floats within the engine base env's solved set.
 # to torch attention paths, so they are deliberately NOT pinned
 # here — install them deliberately on the hardware that wants them.
 av
@@ -30,9 +30,10 @@ einops
 ftfy
 huggingface_hub==1.33.0
 pydantic
-qwen-tts==0.1.1
+faster-qwen3-tts==0.5.4
+qwen-tts-hf==0.1.1.post1
 regex
 torchaudio
 tqdm
-transformers==5.1.0
+transformers==5.20.2
 typing_extensions
