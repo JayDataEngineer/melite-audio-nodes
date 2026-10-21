@@ -8,13 +8,17 @@
 # able to load whichever family the graph addresses. This file is
 # byte-identical across the three packs and the repo wall pins it.
 #
-# VERSION PINS (2026-10-13, round 4): transformers==4.57.3 is the
-# version the estate's live venv runs (the qwen3-tts voice-design
-# lane was verified against it; an unpinned float can pull a
-# transformers whose qwen-tts adapter surface moved). huggingface_hub
-# is held <1.0 for the same reason — the 1.x line removes APIs the
-# snapshot-download paths use. Everything else floats within the
-# engine base env's already-solved set.
+# VERSION PINS (2026-11-10, the py3.14 re-pin): transformers==5.1.0 +
+# huggingface_hub==1.33.0 is the proven pair on the engine's python
+# 3.14 venv. The prior pin (transformers==4.57.3, 2026-10-13 round 4)
+# is DEAD on py3.14: a fresh import cannot even construct
+# PreTrainedConfig. 5.1.0 imports BOTH engine chains clean —
+# moss_sfx_v2 and qwen3_tts, the faithful parent-package tests — and
+# the live engine venv already runs this pair (parent-cured
+# 2026-11-10). The old huggingface_hub<1.0 guard is superseded: the
+# 1.x line is what the 5.x line requires, and 1.33.0 is the version
+# the dual-chain import receipts ran. Everything else floats within
+# the engine base env's already-solved set.
 # The optional GPU wheels (flash-attn, flash_attn_interface,
 # sageattention, xfuser) are GUARDED imports: absent wheels degrade
 # to torch attention paths, so they are deliberately NOT pinned
@@ -24,11 +28,11 @@ descript-audiotools
 diffusers
 einops
 ftfy
-huggingface_hub<1.0
+huggingface_hub==1.33.0
 pydantic
 qwen-tts==0.1.1
 regex
 torchaudio
 tqdm
-transformers==4.57.3
+transformers==5.1.0
 typing_extensions

@@ -15,13 +15,13 @@ dependencies = [
     "diffusers",
     "einops",
     "ftfy",
-    "huggingface_hub<1.0",
+    "huggingface_hub==1.33.0",
     "pydantic",
     "qwen-tts==0.1.1",
     "regex",
     "torchaudio",
     "tqdm",
-    "transformers==4.57.3",
+    "transformers==5.1.0",
     "typing_extensions"
 ]
 
