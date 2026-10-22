@@ -90,6 +90,143 @@ def _ensure_rope_registry() -> None:
     ROPE_INIT_FUNCTIONS["default"] = _tolerant_default_rope_parameters
 
 
+# THE STATIC-CACHE BUDGET (ported from ComfyUI-Qwen3-TTS-Fast's loader,
+# nodes.py: its max_seq_len widget defaults 2048 and every generate
+# path clamps max_new_tokens to max_seq_len - 256 — beyond the static
+# cache the captured graphs cannot hold the decode, so the budget,
+# not faster's 2048 generate default, owns the ceiling).
+_MAX_SEQ_LEN = 2048
+_MAX_NEW_TOKENS = _MAX_SEQ_LEN - 256
+# THE LOAD HEADROOM (the third Triton burn, 2026-10-22: the studio
+# eviction yields torch-managed VRAM, but the foreign block — the
+# prompt's own ggml native session plus leftovers no eviction owns —
+# stays resident. The capture's side-stream allocations then starve
+# and the warmup Triton matmul dies with "(cpu tensor?)", aborting
+# the process AFTER the weights already loaded. Gate the load LOUD
+# below this floor instead of burning the process: the weights'
+# safetensors bytes plus graphs + capture workspace + margin.
+_LOAD_HEADROOM_BYTES = 4_000_000_000
+
+
+def _preinit_static_cache(static_cache: Any, config: Any,
+                          dtype: Any, device: Any) -> None:
+    """Allocate the StaticCache layer buffers ahead of graph capture.
+
+    Ported from ComfyUI-Qwen3-TTS-Fast nodes.py
+    (``_preinit_static_cache``): faster-qwen3-tts calls
+    ``layer.lazy_initialization(k, v)`` (the transformers 5.x
+    signature); 4.x takes a single key tensor and derives value from
+    its shape — identical result either way, since the library passes
+    the same tensor twice. Pre-initing here sets ``is_initialized``,
+    so the library's own loop becomes a no-op on either version.
+    """
+    num_kv = (getattr(config, "num_key_value_heads", None)
+              or config.num_attention_heads)
+    head_dim = (getattr(config, "head_dim", None)
+                or (config.hidden_size // config.num_attention_heads))
+    import torch
+    dummy = torch.zeros(1, num_kv, 1, head_dim, dtype=dtype, device=device)
+    for layer in static_cache.layers:
+        if getattr(layer, "is_initialized", False):
+            continue
+        try:
+            layer.lazy_initialization(dummy, dummy)  # transformers 5.x
+        except TypeError:
+            layer.lazy_initialization(dummy)  # transformers 4.x
+
+
+def _apply_compat(handle: Any) -> None:
+    """Pre-init both graphs' static caches (Fast loader spelling).
+
+    Runs between from_pretrained and warmup so the library's own
+    cache-init loop is a no-op and capture meets initialized layers
+    on transformers 4.x AND 5.x.
+    """
+    talker = handle.talker_graph
+    _preinit_static_cache(talker.static_cache, talker.model.config,
+                          talker.dtype, talker.device)
+    predictor = handle.predictor_graph
+    _preinit_static_cache(predictor.static_cache, predictor.pred_model.config,
+                          predictor.dtype, predictor.device)
+
+
+def _safetensors_bytes(hf_dir: str) -> int:
+    """Sum the *.safetensors weights in the HF dir (the load's cost)."""
+    total = 0
+    try:
+        for name in os.listdir(hf_dir):
+            if name.endswith(".safetensors"):
+                total += os.path.getsize(os.path.join(hf_dir, name))
+    except OSError:
+        pass
+    return total
+
+
+def _require_load_headroom(hf_dir: str, variant: str) -> None:
+    """Refuse LOUD when the card cannot fit the load (never Triton-die).
+
+    The burn's lesson: eager warmup passes and the capture-stream
+    run dies with "(cpu tensor?)" — not a CPU tensor (the same
+    tensors pass eagerly and standalone), a starved allocator
+    handing the Triton kernel a bad pointer AFTER the weights
+    already loaded. Driver-level free (torch's view AND the foreign
+    native block) must cover the weights + graphs + workspace, or
+    the press refuses naming the numbers and the remedy (free the
+    card — the Unload node now also releases the warmed torch copy
+    — and press again).
+    """
+    need = _safetensors_bytes(hf_dir) + _LOAD_HEADROOM_BYTES
+    if need <= _LOAD_HEADROOM_BYTES:
+        raise RuntimeError(
+            f"qwen3_tts: no safetensors weights under {hf_dir} "
+            f"(variant={variant}) — refusing the load, not weighing "
+            f"an empty dir."
+        )
+    try:
+        import torch
+        free_b, total_b = torch.cuda.mem_get_info()
+    except Exception as e:
+        logger.warning("qwen3_tts: cannot query VRAM free (%s); "
+                       "proceeding — the load owns the verdict", e)
+        return
+    if free_b < need:
+        raise RuntimeError(
+            f"qwen3_tts: card cannot fit variant={variant} — "
+            f"driver free {free_b / 1e9:.1f} GB < "
+            f"need {need / 1e9:.1f} GB "
+            f"(weights {_safetensors_bytes(hf_dir) / 1e9:.1f} GB + "
+            f"graphs/workspace {_LOAD_HEADROOM_BYTES / 1e9:.1f} GB). "
+            f"The capture starves below this floor and dies as "
+            f"'Pointer argument cannot be accessed from Triton'. "
+            f"Free the card (the Unload Audiocore Model node now "
+            f"also releases the warmed torch copy) and press again."
+        )
+    logger.info("qwen3_tts: load headroom ok (free %.1f GB >= need %.1f GB)",
+                free_b / 1e9, need / 1e9)
+
+
+def release_warmed_handles() -> int:
+    """Release every warmed torch handle (the Fast Unload semantics).
+
+    The explicit yield gesture: drops the process-wide cache so the
+    ~4.3 GB + graphs return to the card. The next voice run reloads
+    and re-captures (slow once), which is the documented trade the
+    Unload node offers. Returns the released count for the log.
+    """
+    n = len(_WARMED_HANDLES)
+    _WARMED_HANDLES.clear()
+    try:
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    logger.info("qwen3_tts: released %d warmed handle(s)", n)
+    return n
+
+
 # Process-wide warmed torch handles, keyed by (resolved HF dir, variant).
 # UPSTREAM'S LAW (ported 2026-10-22 from the Faster-Qwen3TTS ComfyUI
 # extension: its loader caches one model per key in ``_models`` and
@@ -136,12 +273,19 @@ def _load_warmed_handle(hf_dir: str, variant: str) -> Any:
             ) from e
     logger.info("qwen3_tts: loading variant=%s from %s", variant, hf_dir)
     _ensure_rope_registry()
+    # Gate the allocation BEFORE the weights land: below this floor
+    # the capture starves and Triton-dies after loading (third burn).
+    _require_load_headroom(hf_dir, variant)
     handle = FasterQwen3TTS.from_pretrained(
         hf_dir,
         device="cuda:0",
         dtype=torch.bfloat16,
         attn_implementation="sdpa",
+        max_seq_len=_MAX_SEQ_LEN,
     )
+    # Pre-init the static caches (Fast loader spelling) so the
+    # library's own init loop is a no-op on transformers 4.x/5.x.
+    _apply_compat(handle)
     # Capture at LOAD, not lazily inside the first generate: a cold
     # capture racing a full card is the allocation that died.
     handle.warmup()
@@ -258,6 +402,11 @@ class Qwen3TtsEngine:
                     gen_kwargs[k] = float(kwargs[k]) if k != "top_k" else int(kwargs[k])
                 except (TypeError, ValueError):
                     pass
+        # The captured graphs hold _MAX_SEQ_LEN positions — clamp the
+        # decode length to the static-cache budget (Fast _clamp_tokens
+        # spelling), never faster's 2048 generate default.
+        gen_kwargs["max_new_tokens"] = self._clamp_max_new_tokens(
+            kwargs.get("max_new_tokens", _MAX_NEW_TOKENS))
         # seed conditions torch RNG only — Faster's generate_* take no
         # seed kwarg, so it is NEVER forwarded (would TypeError).
         if seed > 0:
@@ -339,13 +488,12 @@ class Qwen3TtsEngine:
             del self.model
             self.model = None
             self._variant = "customvoice"
-            try:
-                import torch
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+        # Release the process-wide warmed cache too (Fast Unload
+        # semantics): an explicit unload returns the ~4.3 GB + graphs
+        # to the card. _drop_model keeps the cache (variant switches
+        # stay fast); unload() is the yield gesture and owns the
+        # release — the Unload node rides this seat.
+        release_warmed_handles()
 
     # ── Voice Studio: export / preview / load_qvoice ────────────────────
     #
@@ -989,9 +1137,30 @@ class Qwen3TtsEngine:
         return None
 
     @staticmethod
+    def _clamp_max_new_tokens(raw: Any) -> int:
+        """Clamp the decode length to the static-cache budget.
+
+        Ported from ComfyUI-Qwen3-TTS-Fast's ``_clamp_tokens``: the
+        captured graphs hold ``max_seq_len`` positions, so a request
+        beyond ``max_seq_len - 256`` cannot decode — clamp LOUD (log
+        the clamp) instead of decoding into unheld cache.
+        """
+        try:
+            want = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            want = _MAX_NEW_TOKENS
+        if want > _MAX_NEW_TOKENS:
+            logger.warning(
+                "qwen3_tts: max_new_tokens %d exceeds the static-cache "
+                "budget; clamping to %d.", want, _MAX_NEW_TOKENS)
+            return _MAX_NEW_TOKENS
+        return max(1, want)
+
+    @staticmethod
     def _build_gen_kwargs(
         *, temperature: float, top_p: float, top_k: int,
         repetition_penalty: float, seed: int,
+        max_new_tokens: int = _MAX_NEW_TOKENS,
     ) -> dict[str, Any]:
         """Build the gen kwargs forwarded to Faster's generate_*.
 
@@ -1003,6 +1172,8 @@ class Qwen3TtsEngine:
             "top_p": float(top_p),
             "top_k": int(top_k),
             "repetition_penalty": float(repetition_penalty),
+            "max_new_tokens": Qwen3TtsEngine._clamp_max_new_tokens(
+                max_new_tokens),
         }
         if int(seed) > 0:
             import torch

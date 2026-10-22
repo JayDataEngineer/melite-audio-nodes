@@ -969,6 +969,19 @@ class UnloadAudiocoreModel:
 
     def unload(self, model: ManagedModel):
         model.unload()
+        # Release the warmed torch copy too (Fast Unload semantics):
+        # model.unload() destroys the native session, but the qwen3
+        # torch engine's process-wide warmed cache (~4.3 GB + graphs)
+        # is a separate seat that no eviction owns. The gate's remedy
+        # names this node — it must actually free both seats.
+        try:
+            from .engines.qwen3_tts import release_warmed_handles
+            n = release_warmed_handles()
+            logger.info("UnloadAudiocoreModel: released %d warmed "
+                        "torch handle(s)", n)
+        except Exception as e:
+            logger.warning("UnloadAudiocoreModel: torch cache release "
+                           "skipped (%s)", e)
         return ()
 
 
