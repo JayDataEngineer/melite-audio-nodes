@@ -7,7 +7,12 @@ Two engine paths behind ONE ManagedModel → node contract:
   from_pretrained()` loads the HF checkpoint directly; ComfyUI manages the
   model lifecycle like any torch model — gc + empty_cache return VRAM. No
   GGUF, no C++, no ctypes, no eviction nodes. See engines/moss_sfx_v2.py.
-- **Every other family** (moss_tts, qwen3_tts, ace_step) runs the audiocpp
+- **qwen3_tts** rides the Python engine (faster-qwen3-tts, torch —
+  engines/qwen3_tts.py) since THE FLIP (2026-10-22, the MP3 clone burn):
+  the card lane (AudiocoreTTS) joined the Voice Studio lane on ONE
+  engine; ref audio loads in Python (MP3 included). The native qwen3
+  session stays unused on this family.
+- **Every other family** (moss_tts, ace_step) runs the audiocpp
   C++ engine_runtime in-process (libaudiocore_native.so via ctypes): no
   subprocess, no HTTP. The C++ path persists until torch ports exist.
 
@@ -41,7 +46,10 @@ _FAMILY_VRAM_ESTIMATE: dict[str, int] = {
     "moss_tts_nano":     9 * 1024 * 1024 * 1024,
     "moss_tts_local":    9 * 1024 * 1024 * 1024,
     "moss_sfx_v2":       4 * 1024 * 1024 * 1024,
-    "qwen3_tts":         2 * 1024 * 1024 * 1024,
+    # torch lane (FasterQwen3TTS, THE FLIP): ~4.3 GB weights + captured
+    # graphs — the burn-receipted figure (nodes.py VRAM-yield note), not
+    # the native session's 2 GB.
+    "qwen3_tts":         5 * 1024 * 1024 * 1024,
     "ace_step":          8 * 1024 * 1024 * 1024,
 }
 
@@ -315,6 +323,11 @@ class ManagedModel:
             return True
         if self.family == "moss_sfx_v2":
             return self._load_torch(on_progress=on_progress)
+        if self.family == "qwen3_tts":
+            # THE FLIP (2026-10-22): the card lane rides the Python
+            # engine — same seat the Voice Studio already holds. The
+            # native qwen3 session is no longer reached from this family.
+            return self._load_qwen3_torch(on_progress=on_progress)
         if self._session is not None:
             return True
 
@@ -448,6 +461,52 @@ class ManagedModel:
             self._torch_engine = None
             return False
 
+    def _load_qwen3_torch(
+        self,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """Load qwen3_tts via the Python engine (THE FLIP, 2026-10-22).
+
+        FasterQwen3TTS (torch) behind the warmed-handle cache — the same
+        handle the Voice Studio rides. VRAM yield first, the studio law
+        (the 2026-10-22 Triton burn): a staged ComfyUI model resident
+        when the torch engine loads starves the allocator.
+        """
+        prev = ManagedModel._active_model
+        if prev is not None and prev is not self:
+            logger.info(
+                "unloading %s before loading %s", prev.family, self.family)
+            prev._cleanup()
+        try:
+            import comfy.model_management as _mm
+            _mm.unload_all_models()
+            logger.info(
+                "qwen3_tts: evicted ComfyUI-resident models before "
+                "torch engine work")
+        except ImportError:
+            pass
+        try:
+            from .engines.qwen3_tts import Qwen3TtsEngine
+
+            engine = Qwen3TtsEngine()
+            loaded = engine.load(self.path, **self._extras)
+            if not loaded:
+                return False
+            self._torch_engine = engine
+            ManagedModel._active_model = self
+            logger.info(
+                "loaded %s from %s (torch qwen3 engine)",
+                self.family, self.path)
+            return True
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(
+                "torch qwen3 load failed for %s: %s", self.family, e)
+            self.last_error = str(e)
+            self._torch_engine = None
+            return False
+
     def _register_in_model_management(self) -> None:
         try:
             from comfy import model_management
@@ -533,6 +592,11 @@ class ManagedModel:
         """
         self._ensure_loaded()
         if self._torch_engine is not None:
+            if self.family == "qwen3_tts":
+                # THE FLIP: the card rides the Python engine — mode,
+                # voice, reference_audio (MP3 included) all load and
+                # synthesize in Python.
+                return self._torch_engine.run_tts(text, **kwargs)
             return self._run_torch_sfx(text, kwargs, None)
         request = self._build_speech_request(text, kwargs)
         assert self._session is not None
@@ -545,6 +609,8 @@ class ManagedModel:
         """Run TTS/SFX with optional progress callback. Returns (pcm, sample_rate)."""
         self._ensure_loaded()
         if self._torch_engine is not None:
+            if self.family == "qwen3_tts":
+                return self._torch_engine.run_tts(text, **kwargs)
             return self._run_torch_sfx(text, kwargs, on_progress)
         assert self._session is not None
         if on_progress is not None:
@@ -631,6 +697,12 @@ class ManagedModel:
     def run_music(self, caption: str, **kwargs: Any) -> tuple[list[float], int, int]:
         """Run music generation. Returns (pcm, sample_rate, channels)."""
         self._ensure_loaded()
+        if self._torch_engine is not None and hasattr(
+                self._torch_engine, "run_music"):
+            # qwen3_tts refuses LOUD here ("does not support music
+            # generation") — the engine's own voice, not a None-session
+            # crash.
+            return self._torch_engine.run_music(caption, **kwargs)
         request = self._build_music_request(caption, kwargs)
         assert self._session is not None
         pcm, sr, ch = self._session.run(request)
@@ -686,6 +758,10 @@ class ManagedModel:
         """Compute a speaker embedding via the native engine."""
         self._ensure_loaded()
         if self._torch_engine is not None:
+            if self.family == "qwen3_tts":
+                # THE FLIP: speaker embeddings compute in Python —
+                # the Faster handle's own x-vector extraction.
+                return self._torch_engine.compute_embedding(wav_path)
             raise RuntimeError(
                 "compute_embedding is a C++-engine feature — the torch SFX "
                 "pipeline has no embedding extraction"

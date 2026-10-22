@@ -1255,6 +1255,29 @@ class Qwen3TtsEngine:
                 "qwen3_tts voice_clone requires either speaker_embedding "
                 "(from AudiocoreVoiceEmbedding) or reference_audio path."
             )
+        # No transcript stated → x-vector-only clone (the embedding
+        # lane), never Faster's ICL default: qwen_tts raises
+        # "ref_text is required when x_vector_only_mode=False" for a
+        # transcript-less reference (the MP3 burn's second act). The
+        # same mode compute_embedding rides; ref_audio loads in
+        # Python (MP3 included).
+        if not (ref_text or "").strip():
+            prompt_items = self._qwen.create_voice_clone_prompt(
+                ref_audio=ref_audio,
+                ref_text=None,
+                x_vector_only_mode=True,
+            )
+            if not prompt_items:
+                raise RuntimeError(
+                    "qwen3_tts: voice clone produced no prompt item from "
+                    f"{ref_audio!r}")
+            audios, sr = self.model.generate_voice_clone(
+                text=text,
+                language=language,
+                voice_clone_prompt=[prompt_items[0]],
+                **gen_kwargs,
+            )
+            return self._to_pcm(audios, sr)
         audios, sr = self.model.generate_voice_clone(
             text=text,
             language=language,
