@@ -537,6 +537,7 @@ class Qwen3TtsEngine:
         *,
         ref_audio: str = "",
         ref_text: str = "",
+        speaker: str = "",
         sample_text: str = "",
         wdelta: bool = False,
         voices_dir: str = "",
@@ -580,6 +581,15 @@ class Qwen3TtsEngine:
         )
         ref_path = (ref_audio or "").strip()
         transcript = (ref_text or "").strip()
+        speaker_name = (speaker or "").strip()
+        if speaker_name and ref_path:
+            raise RuntimeError(
+                "export_voice: state ONE voice source — speaker (preset "
+                "save) or reference_audio (clone save), not both")
+        if speaker_name and instruct.strip():
+            raise RuntimeError(
+                "export_voice: state ONE voice source — speaker (preset "
+                "save) or instruct (design save), not both")
         if ref_path and instruct.strip():
             raise RuntimeError(
                 "export_voice: state ONE voice source — reference_audio "
@@ -588,12 +598,15 @@ class Qwen3TtsEngine:
             raise RuntimeError(
                 "export_voice: a reference save rides lite (wdelta patches "
                 "the DESIGNED talker — a cloned voice has no design)")
-        if not ref_path and not instruct.strip():
+        if speaker_name and wdelta:
             raise RuntimeError(
-                "export_voice: instruct is required (VoiceDesign needs a "
-                "style description, e.g. 'A warm female voice with a slight "
-                "British accent, conversational pace.') — or state "
-                "reference_audio to save a cloned voice."
+                "export_voice: a preset save rides lite (wdelta patches "
+                "the DESIGNED talker — a preset speaker has no design)")
+        if not ref_path and not instruct.strip() and not speaker_name:
+            raise RuntimeError(
+                "export_voice: state ONE voice source — instruct (design "
+                "save), reference_audio (clone save), or speaker (preset "
+                "save, a CustomVoice built-in like vivian or ryan)"
             )
 
         gen_kwargs = self._build_gen_kwargs(
@@ -640,6 +653,50 @@ class Qwen3TtsEngine:
                 out_path, ref_path, payload_size,
             )
             return out_path, sample_pcm, sample_sr
+
+        # THE PRESET-SAVE ARM (the qvoice boolean law, third lane —
+        # operator 2026-10-22: "save the embeddings to media" from
+        # ANY lane): the preset speaker IS the voice — CustomVoice
+        # renders it speaking synth_text, that render is the
+        # reference (its transcript is known verbatim — full ICL,
+        # never x-vector-only), Base extracts the clone prompt, lite
+        # persists. The preview speaks in the preset's voice.
+        if speaker_name:
+            self._ensure_variant("customvoice")
+            audios, sr = self.model.generate_custom_voice(
+                text=synth_text, speaker=speaker_name,
+                language=language, **gen_kwargs,
+            )
+            sample_pcm, sample_sr = self._to_pcm(audios, sr)
+            ref_wav_path = self._write_wav(sample_pcm, sample_sr)
+            try:
+                self._ensure_variant("base")
+                items = self._qwen.create_voice_clone_prompt(
+                    ref_audio=ref_wav_path,
+                    ref_text=synth_text,
+                    x_vector_only_mode=False,  # transcript known verbatim
+                )
+                if not items:
+                    raise RuntimeError(
+                        "create_voice_clone_prompt returned no items "
+                        f"from the preset {speaker_name!r} render")
+                payload_size = _qv.write_lite(
+                    out_path,
+                    name=unique_name,
+                    instruct="",
+                    sample_text=synth_text,
+                    items=items,
+                    export_variant=_qv.size_tag(self._model_dir or ""),
+                )
+                logger.info(
+                    "qvoice: wrote lite %s from preset speaker %s "
+                    "(%d bytes payload)",
+                    out_path, speaker_name, payload_size,
+                )
+                return out_path, sample_pcm, sample_sr
+            finally:
+                if ref_wav_path and os.path.exists(ref_wav_path):
+                    os.unlink(ref_wav_path)
 
         # Step 1: VoiceDesign → ref WAV.
         self._ensure_variant("voicedesign")

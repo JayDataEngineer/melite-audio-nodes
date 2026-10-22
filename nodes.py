@@ -726,6 +726,10 @@ class AudiocoreVoiceStudio:
                     "default": "",
                     "placeholder": "transcript of reference_audio (optional — x-vector-only without it)",
                 }),
+                "speaker": ("STRING", {
+                    "default": "",
+                    "placeholder": "preset speaker, e.g. vivian (preset save — instead of instruct/reference)",
+                }),
                 "sample_text": ("STRING", {
                     "multiline": True,
                     "default": "",
@@ -814,20 +818,31 @@ class AudiocoreVoiceStudio:
             # cloned voice — instruct stays the DESIGN lane's word.
             ref_audio = kw.get("reference_audio") or ""
             ref_text = kw.get("reference_text") or ""
-            if not instruct.strip() and not ref_audio.strip():
+            speaker = kw.get("speaker") or ""
+            if not instruct.strip() and not ref_audio.strip() and not speaker.strip():
                 raise RuntimeError(
-                    f"{mode}: instruct is required — describe the voice — "
-                    "or state reference_audio to save a cloned voice")
+                    f"{mode}: state ONE voice source — instruct (design "
+                    "save), reference_audio (clone save), or speaker "
+                    "(preset save, e.g. vivian)")
             if ref_audio.strip() and instruct.strip():
                 raise RuntimeError(
                     f"{mode}: ONE voice source — reference_audio (clone "
                     "save) or instruct (design save), not both")
+            if speaker.strip() and instruct.strip():
+                raise RuntimeError(
+                    f"{mode}: ONE voice source — speaker (preset save) or "
+                    "instruct (design save), not both")
+            if speaker.strip() and ref_audio.strip():
+                raise RuntimeError(
+                    f"{mode}: ONE voice source — speaker (preset save) or "
+                    "reference_audio (clone save), not both")
             out_path, sample_pcm, sample_sr = _run_with_progress(
                 lambda report: engine.export_voice(
                     name=name,
                     instruct=instruct,
                     ref_audio=ref_audio,
                     ref_text=ref_text,
+                    speaker=speaker,
                     sample_text=kw.get("sample_text") or "",
                     wdelta=(mode == "export_wdelta"),
                     voices_dir=kw.get("voices_dir") or "",
