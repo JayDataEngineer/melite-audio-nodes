@@ -90,6 +90,67 @@ def _ensure_rope_registry() -> None:
     ROPE_INIT_FUNCTIONS["default"] = _tolerant_default_rope_parameters
 
 
+# Process-wide warmed torch handles, keyed by (resolved HF dir, variant).
+# UPSTREAM'S LAW (ported 2026-10-22 from the Faster-Qwen3TTS ComfyUI
+# extension: its loader caches one model per key in ``_models`` and
+# every consumer node generates through the cached handle): each
+# studio run used to construct a fresh engine that reloaded ~4.3 GB
+# and re-captured the CUDA graphs, while the loader ALSO held the
+# same weights as a native session. After a heavy ComfyUI run (a
+# ~20 GB staged model on a 24 GB card), the repeat load + graph
+# capture starved VRAM and the warmup's Triton matmul died with
+# "Pointer argument cannot be accessed from Triton (cpu tensor?)",
+# then the process itself aborted (c10::AcceleratorError). One copy
+# per key, warmed once at load, shared by every run in the process.
+_WARMED_HANDLES: dict[tuple[str, str], Any] = {}
+
+
+def _load_warmed_handle(hf_dir: str, variant: str) -> Any:
+    """Return the warmed FasterQwen3TTS handle for (hf_dir, variant).
+
+    Cache hit: the already-loaded, already-warmed handle (no reload,
+    no graph re-capture). Cache miss: load from the HF dir, capture
+    the CUDA graphs NOW (upstream's ``warmup=True`` loader default —
+    never lazily mid-run under pressure), then cache. The single
+    loading spelling: ``load()`` and ``_ensure_variant`` both ride
+    this seat.
+    """
+    key = (hf_dir, variant)
+    cached = _WARMED_HANDLES.get(key)
+    if cached is not None:
+        logger.info("qwen3_tts: reusing warmed variant=%s from %s",
+                    variant, hf_dir)
+        return cached
+    import contextlib
+    import io
+    import torch
+    # Silence stdout on import (flash-attn warning) so it doesn't
+    # pollute ComfyUI logs.
+    with contextlib.redirect_stdout(io.StringIO()):
+        try:
+            from faster_qwen3_tts import FasterQwen3TTS
+        except ImportError as e:
+            raise RuntimeError(
+                "qwen3_tts: faster-qwen3-tts Python package not "
+                f"installed: {e}"
+            ) from e
+    logger.info("qwen3_tts: loading variant=%s from %s", variant, hf_dir)
+    _ensure_rope_registry()
+    handle = FasterQwen3TTS.from_pretrained(
+        hf_dir,
+        device="cuda:0",
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+    )
+    # Capture at LOAD, not lazily inside the first generate: a cold
+    # capture racing a full card is the allocation that died.
+    handle.warmup()
+    _WARMED_HANDLES[key] = handle
+    logger.info("qwen3_tts: variant=%s warmed and cached (device=%s)",
+                variant, handle.device)
+    return handle
+
+
 # Default hyperparameters — match the audiocore node defaults where possible.
 # speaker defaults to "" (unstated): _custom_voice LOUD-refuses an empty
 # speaker on the plain-TTS path — the silent vivian fallback is dead
@@ -146,9 +207,6 @@ class Qwen3TtsEngine:
           - variant:           'customvoice' (default) | 'base' | 'voicedesign'
           - speaker_encoder_path: ignored (the Base HF dir ships its own)
         """
-        import contextlib
-        import io
-
         variant_hint = str(extras.get("variant", "")).lower().strip()
         # Treat empty/missing hint as None so _resolve_model_dir uses the
         # path-suffix detection (default → customvoice).
@@ -163,27 +221,7 @@ class Qwen3TtsEngine:
         # Track which variant was resolved so preview/export know what's live.
         self._variant = self._detect_variant_from_dir(hf_dir)
 
-        # Silence stdout on import (flash-attn warning) so it doesn't
-        # pollute ComfyUI logs.
-        with contextlib.redirect_stdout(io.StringIO()):
-            try:
-                from faster_qwen3_tts import FasterQwen3TTS
-            except ImportError as e:
-                raise RuntimeError(
-                    "qwen3_tts: faster-qwen3-tts Python package not "
-                    f"installed: {e}"
-                ) from e
-
-        import torch
-
-        logger.info("qwen3_tts: loading FasterQwen3TTS from %s", hf_dir)
-        _ensure_rope_registry()
-        self.model = FasterQwen3TTS.from_pretrained(
-            hf_dir,
-            device="cuda:0",
-            dtype=torch.bfloat16,
-            attn_implementation="sdpa",
-        )
+        self.model = _load_warmed_handle(hf_dir, self._variant)
         self._model_dir = hf_dir
         logger.info(
             "qwen3_tts: model ready (device=%s, speakers=%s)",
@@ -748,14 +786,20 @@ class Qwen3TtsEngine:
         return [pcm[min(i, len(pcm) - 1)] for i in idx]
 
     def _ensure_variant(self, variant: str) -> None:
-        """Load `variant` if it isn't already active. Bypasses ManagedModel.
+        """Adopt the warmed handle for `variant`. Bypasses ManagedModel.
 
-        Uses the same _resolve_model_dir helper so HF cache lookup,
-        flat-dir detection, and snapshot_download fallback all work.
+        The handle comes from the process-wide cache (loaded + warmed
+        once at first use, reused by every later run) — never a fresh
+        load per call. Uses the same _resolve_model_dir helper so HF
+        cache lookup, flat-dir detection, and snapshot_download
+        fallback all work.
         """
         if self.model is not None and self._variant == variant:
             return
-        # Need to swap — drop current and load new.
+        # Release this engine's claim before adopting the cached
+        # handle. The cache keeps the weights resident for the next
+        # run — _drop_model only drops OUR reference, never the
+        # cached copy.
         if self.model is not None:
             self._drop_model()
         # Use a synthetic path: _resolve_model_dir keys off the variant hint.
@@ -770,19 +814,7 @@ class Qwen3TtsEngine:
                 f"extra_model_paths.yaml "
                 f"(image-gen/comfyui/audio/qwen3-tts/hf/)."
             )
-        import contextlib
-        import io
-        import torch
-        with contextlib.redirect_stdout(io.StringIO()):
-            from faster_qwen3_tts import FasterQwen3TTS
-        logger.info("qwen3_tts: loading variant=%s from %s", variant, hf_dir)
-        _ensure_rope_registry()
-        self.model = FasterQwen3TTS.from_pretrained(
-            hf_dir,
-            device="cuda:0",
-            dtype=torch.bfloat16,
-            attn_implementation="sdpa",
-        )
+        self.model = _load_warmed_handle(hf_dir, variant)
         self._model_dir = hf_dir
         self._variant = variant
         logger.info("qwen3_tts: variant=%s ready (device=%s)",

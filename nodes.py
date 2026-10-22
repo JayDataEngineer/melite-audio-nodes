@@ -774,11 +774,27 @@ class AudiocoreVoiceStudio:
                 f"{e}"
             ) from e
 
+        # THE VRAM YIELD (the 2026-10-22 Triton burn: a ~20 GB staged
+        # model still resident when the studio loaded its own ~4.3 GB
+        # torch copy + captured graphs starved the allocator and the
+        # warmup matmul died with "Pointer argument cannot be accessed
+        # from Triton (cpu tensor?)", aborting the process). The studio
+        # rides the torch engine, not the wired native session — evict
+        # ComfyUI-resident models FIRST, the same yield every loader
+        # performs before a big allocation. Loud when the seat is
+        # missing (a studio that cannot yield must not run blind).
+        try:
+            import comfy.model_management as _mm
+        except ImportError as e:
+            raise RuntimeError(
+                "Voice Studio requires comfy.model_management to yield "
+                f"VRAM before loading the torch engine: {e}"
+            ) from e
+        _mm.unload_all_models()
+        logger.info("VoiceStudio: evicted ComfyUI-resident models "
+                    "before torch engine work")
+
         engine = _Qwen3TtsEngine()
-        # Resolve voice_dir from the model path
-        model_dir = os.path.dirname(model.path) if os.path.isfile(
-            os.path.join(model.path, "config.json")
-        ) else model.path
         kw = {k: v for k, v in kwargs.items() if v not in (None, "")}
 
         if mode in ("export_lite", "export_wdelta"):
