@@ -535,6 +535,8 @@ class Qwen3TtsEngine:
         name: str,
         instruct: str,
         *,
+        ref_audio: str = "",
+        ref_text: str = "",
         sample_text: str = "",
         wdelta: bool = False,
         voices_dir: str = "",
@@ -576,17 +578,68 @@ class Qwen3TtsEngine:
             "Hello, I am a friendly voice assistant. "
             "How can I help you today?"
         )
-        if not instruct.strip():
+        ref_path = (ref_audio or "").strip()
+        transcript = (ref_text or "").strip()
+        if ref_path and instruct.strip():
+            raise RuntimeError(
+                "export_voice: state ONE voice source — reference_audio "
+                "(clone save) or instruct (design save), not both")
+        if ref_path and wdelta:
+            raise RuntimeError(
+                "export_voice: a reference save rides lite (wdelta patches "
+                "the DESIGNED talker — a cloned voice has no design)")
+        if not ref_path and not instruct.strip():
             raise RuntimeError(
                 "export_voice: instruct is required (VoiceDesign needs a "
                 "style description, e.g. 'A warm female voice with a slight "
-                "British accent, conversational pace.')"
+                "British accent, conversational pace.') — or state "
+                "reference_audio to save a cloned voice."
             )
 
         gen_kwargs = self._build_gen_kwargs(
             temperature=temperature, top_p=top_p, top_k=top_k,
             repetition_penalty=repetition_penalty, seed=seed,
         )
+
+        # THE CLONE-SAVE ARM (the qvoice boolean law, operator
+        # 2026-10-22: "save the embeddings to media" from ANY lane):
+        # the operator's reference IS the voice — the Base variant
+        # extracts the clone prompt directly (x-vector-only when no
+        # transcript rides, the mode _voice_clone cures); no
+        # VoiceDesign fire. The save preview speaks synth_text in the
+        # cloned voice — the sample that seeded the .qvoice, the
+        # export arm's own receipt law.
+        if ref_path:
+            self._ensure_variant("base")
+            items = self._qwen.create_voice_clone_prompt(
+                ref_audio=ref_path,
+                ref_text=transcript or None,
+                x_vector_only_mode=not transcript,
+            )
+            if not items:
+                raise RuntimeError(
+                    "export_voice: create_voice_clone_prompt returned no "
+                    f"items from {ref_path!r}")
+            audios, sr = self.model.generate_voice_clone(
+                text=synth_text,
+                language=language,
+                voice_clone_prompt=[items[0]],
+                **gen_kwargs,
+            )
+            sample_pcm, sample_sr = self._to_pcm(audios, sr)
+            payload_size = _qv.write_lite(
+                out_path,
+                name=unique_name,
+                instruct="",
+                sample_text=synth_text,
+                items=items,
+                export_variant=_qv.size_tag(self._model_dir or ""),
+            )
+            logger.info(
+                "qvoice: wrote lite %s from reference %s (%d bytes payload)",
+                out_path, ref_path, payload_size,
+            )
+            return out_path, sample_pcm, sample_sr
 
         # Step 1: VoiceDesign → ref WAV.
         self._ensure_variant("voicedesign")

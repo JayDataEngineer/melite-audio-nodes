@@ -717,6 +717,15 @@ class AudiocoreVoiceStudio:
                     "default": "",
                     "placeholder": "A warm female voice with a slight British accent.",
                 }),
+                "reference_audio": ("STRING", {
+                    "default": "",
+                    "placeholder": "/path/to/clone_ref.wav or .mp3 (clone save — instead of instruct)",
+                }),
+                "reference_text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "placeholder": "transcript of reference_audio (optional — x-vector-only without it)",
+                }),
                 "sample_text": ("STRING", {
                     "multiline": True,
                     "default": "",
@@ -800,14 +809,25 @@ class AudiocoreVoiceStudio:
         if mode in ("export_lite", "export_wdelta"):
             name = kw.get("name") or "voice"
             instruct = kw.get("instruct") or ""
-            if not instruct.strip():
+            # THE CLONE-SAVE ARM (the qvoice boolean law: the save
+            # fires from ANY lane): a stated reference saves the
+            # cloned voice — instruct stays the DESIGN lane's word.
+            ref_audio = kw.get("reference_audio") or ""
+            ref_text = kw.get("reference_text") or ""
+            if not instruct.strip() and not ref_audio.strip():
                 raise RuntimeError(
-                    f"{mode}: instruct is required — describe the voice"
-                )
+                    f"{mode}: instruct is required — describe the voice — "
+                    "or state reference_audio to save a cloned voice")
+            if ref_audio.strip() and instruct.strip():
+                raise RuntimeError(
+                    f"{mode}: ONE voice source — reference_audio (clone "
+                    "save) or instruct (design save), not both")
             out_path, sample_pcm, sample_sr = _run_with_progress(
                 lambda report: engine.export_voice(
                     name=name,
                     instruct=instruct,
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
                     sample_text=kw.get("sample_text") or "",
                     wdelta=(mode == "export_wdelta"),
                     voices_dir=kw.get("voices_dir") or "",
