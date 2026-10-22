@@ -273,6 +273,21 @@ def _load_warmed_handle(hf_dir: str, variant: str) -> Any:
             ) from e
     logger.info("qwen3_tts: loading variant=%s from %s", variant, hf_dir)
     _ensure_rope_registry()
+    # CUDA graph capture (warmup below) requires the native caching
+    # allocator. ComfyUI defaults to cudaMallocAsync for torch 2.0+
+    # (--cuda-malloc); under it the capture-time Triton matmul dies
+    # with "Pointer argument cannot be accessed from Triton (cpu
+    # tensor?)" even with the card 90% free (fourth burn — bisected
+    # standalone: async allocator burns, native passes). Refuse loud
+    # with the cure named rather than dying opaquely mid-capture.
+    backend = torch.cuda.get_allocator_backend()
+    if backend == "cudaMallocAsync":
+        raise RuntimeError(
+            "qwen3_tts: CUDA allocator backend is 'cudaMallocAsync' — "
+            "CUDA graph capture is incompatible with it. Restart "
+            "ComfyUI with --disable-cuda-malloc (native caching "
+            "allocator) to load the qwen3-tts variants."
+        )
     # Gate the allocation BEFORE the weights land: below this floor
     # the capture starves and Triton-dies after loading (third burn).
     _require_load_headroom(hf_dir, variant)
