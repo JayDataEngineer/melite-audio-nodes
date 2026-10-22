@@ -730,6 +730,11 @@ class AudiocoreVoiceStudio:
                     "default": "",
                     "placeholder": "preset speaker, e.g. vivian (preset save — instead of instruct/reference)",
                 }),
+                "style_instruction": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "placeholder": "delivery style — conditions the render (CustomVoice lane)",
+                }),
                 "sample_text": ("STRING", {
                     "multiline": True,
                     "default": "",
@@ -843,6 +848,7 @@ class AudiocoreVoiceStudio:
                     ref_audio=ref_audio,
                     ref_text=ref_text,
                     speaker=speaker,
+                    style_instruction=kw.get("style_instruction") or "",
                     sample_text=kw.get("sample_text") or "",
                     wdelta=(mode == "export_wdelta"),
                     voices_dir=kw.get("voices_dir") or "",

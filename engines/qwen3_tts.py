@@ -538,6 +538,7 @@ class Qwen3TtsEngine:
         ref_audio: str = "",
         ref_text: str = "",
         speaker: str = "",
+        style_instruction: str = "",
         sample_text: str = "",
         wdelta: bool = False,
         voices_dir: str = "",
@@ -604,9 +605,17 @@ class Qwen3TtsEngine:
                 "the DESIGNED talker — a preset speaker has no design)")
         if not ref_path and not instruct.strip() and not speaker_name:
             raise RuntimeError(
-                "export_voice: state ONE voice source — instruct (design "
-                "save), reference_audio (clone save), or speaker (preset "
-                "save, a CustomVoice built-in like vivian or ryan)"
+                "export_voice: nothing to save — the save renders with "
+                "the press's own params and persists THAT voice (state a "
+                "preset speaker, a reference clip, or a design word — "
+                "the run path's own one-voice law)"
+            )
+        style_word = (style_instruction or "").strip()
+        if style_word and not speaker_name:
+            logger.warning(
+                "export_voice: style_instruction conditions only the "
+                "CustomVoice render — this save's lane has no speaker "
+                "to deliver it; persisting the voice without the style"
             )
 
         gen_kwargs = self._build_gen_kwargs(
@@ -663,9 +672,13 @@ class Qwen3TtsEngine:
         # persists. The preview speaks in the preset's voice.
         if speaker_name:
             self._ensure_variant("customvoice")
+            # Style conditions the RENDER (the CV lane's instruct slot —
+            # _custom_voice passes instruct through exactly as stated);
+            # the extraction takes the voice from what style delivered.
             audios, sr = self.model.generate_custom_voice(
                 text=synth_text, speaker=speaker_name,
-                language=language, **gen_kwargs,
+                language=language, instruct=style_word or None,
+                **gen_kwargs,
             )
             sample_pcm, sample_sr = self._to_pcm(audios, sr)
             ref_wav_path = self._write_wav(sample_pcm, sample_sr)
