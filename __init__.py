@@ -27,6 +27,17 @@ that is neither declared nor overridden fails loud at import):
 """
 from __future__ import annotations
 
+# THE BOOT ENV ASSERT (audit 016, 2026-11-12): declare-only is not a
+# contract. The venv is shared and Manager re-runs requirements only on
+# this pack's install/update — an outside pin un-converges an installed
+# machine silently and every qwen3_tts run dies with a raw
+# AttributeError. Refuse the IMPORT instead, with the named remedy
+# (ComfyUI/Manager surface failed pack imports at boot). Same grammar
+# as install.py's sha256 gate and the allocator preflight.
+from .env_assert import assert_transformers_floor
+
+assert_transformers_floor()
+
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

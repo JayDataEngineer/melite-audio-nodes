@@ -1,6 +1,11 @@
 [project]
 name = "melite-audio-nodes"
-version = "0.1.0"
+# 0.1.1 (2026-11-12, audit 016): the boot-time env assert (env_assert
+# + __init__) rides this bump — Manager re-runs requirements only on
+# install/UPDATE, so the bump is what re-converges every
+# already-installed machine (the 10-23 transformers 5.1.0 drift died
+# mid-run on all of them).
+version = "0.1.1"
 description = "Melite Audio (Audiocore TTS/SFX/Music) — a Melite first-party ComfyUI extension pack"
 # Version display + package identity for ComfyUI-Manager (it reads
 # this for its version column). Dependencies live in BOTH files by
