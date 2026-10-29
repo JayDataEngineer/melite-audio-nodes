@@ -502,9 +502,14 @@ class ManagedModel:
                 return False
             self._torch_engine = engine
             self._seat_resident()
-            # No current_loaded_models registration: the pipeline is a plain
-            # torch object — ComfyUI's gc + empty_cache manage its VRAM. The
-            # AudiocoreLoadedModel protocol existed for the C++ session.
+            # THE /free SEAT (tts NEW-1, 2026-11-12): the torch seats
+            # register exactly like the native ones — ComfyUI's
+            # free_memory iteration is the ONLY eviction owner both
+            # seats answer to. (The old comment claimed gc +
+            # empty_cache manage this VRAM; they don't touch captured
+            # graphs or the warmed dict, which is why /free freed
+            # ~6 GB while ~15 GB stayed resident.)
+            self._register_in_model_management()
             logger.info("loaded %s from %s (torch pipeline)", self.family, self.path)
             return True
         except RuntimeError:
@@ -543,6 +548,10 @@ class ManagedModel:
                 return False
             self._torch_engine = engine
             self._seat_resident()
+            # THE /free SEAT (tts NEW-1, 2026-11-12): registered like
+            # every other seat — native /free reaches this engine
+            # through ComfyUI's own eviction loop, no bespoke route.
+            self._register_in_model_management()
             logger.info(
                 "loaded %s from %s (torch qwen3 engine)",
                 self.family, self.path)
@@ -580,9 +589,15 @@ class ManagedModel:
         self._loaded_model_wrapper = None
 
     def _free_session(self) -> None:
-        """Destroy the native session WITHOUT touching current_loaded_models.
+        """Destroy the resident engine WITHOUT touching current_loaded_models.
 
-        Called from model_unload() during ComfyUI's free_memory iteration.
+        Called from model_unload() during ComfyUI's free_memory iteration
+        (the /free seat), and the seat the torch loaders register into.
+        ALSO drops the warmed torch copy: release_warmed_handles clears
+        the process-wide handle map (tts NEW-1 — the ~15 GB seat native
+        /free could never see, previously freed only by the Unload
+        node's explicit gesture). After this call the next voice run
+        reloads and re-captures (slow once) — the documented trade.
         """
         if self._session is not None:
             self._session.destroy()
@@ -590,6 +605,16 @@ class ManagedModel:
         if self._torch_engine is not None:
             self._torch_engine.unload()
             self._torch_engine = None
+        # THE WARMED SEAT (tts NEW-1): the process-wide torch cache
+        # is a separate seat no eviction owns — the eviction path
+        # owns it now, mirroring the Unload node's gesture.
+        try:
+            from .engines.qwen3_tts import release_warmed_handles
+            n = release_warmed_handles()
+            if n:
+                logger.info("eviction released %d warmed torch handle(s)", n)
+        except Exception as e:
+            logger.warning("eviction torch cache release skipped (%s)", e)
         self._drop_resident()
         self._loaded_model_wrapper = None
         import gc
@@ -874,14 +899,20 @@ class _AudiocorePatcherStub:
     def model_size(self) -> int:
         return self._managed._estimated_vram
 
+    def _live(self) -> bool:
+        # EITHER resident seat counts (tts NEW-1): the native session
+        # or the torch engine. The old `_session is not None` reads
+        # below reported every torch seat as unloaded.
+        return self._managed._session is not None or self._managed._torch_engine is not None
+
     def loaded_size(self) -> int:
-        if self._managed._session is not None:
+        if self._live():
             return self._managed._estimated_vram
         return 0
 
     def current_loaded_device(self):
         import torch
-        if self._managed._session is not None and torch.cuda.is_available():
+        if self._live() and torch.cuda.is_available():
             return torch.device("cuda", 0)
         return None
 
@@ -890,7 +921,7 @@ class _AudiocorePatcherStub:
 
     def model_mmap_residency(self, free: bool = False):
         total = self._managed._estimated_vram
-        if self._managed._session is not None:
+        if self._live():
             return (total, total)
         return (0, total)
 
@@ -956,7 +987,11 @@ class AudiocoreLoadedModel:
         return id(self._managed)
 
     def is_dead(self) -> bool:
-        return self._managed._session is None
+        # A torch seat with no native session is LIVE (tts NEW-1):
+        # the old `_session is None` spelling read every torch seat
+        # as dead, so ComfyUI's free_memory SKIPPED exactly the seats
+        # it needed to evict (and the gc pass logged them as leaks).
+        return self._managed._session is None and self._managed._torch_engine is None
 
     def real_model(self):
         # Return a dummy callable instead of None. ComfyUI's cleanup_models()
