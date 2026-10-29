@@ -1269,6 +1269,43 @@ class MeliteAudioMix:
         return ({"waveform": mixed, "sample_rate": sr1},)
 
 
+class MeliteAudioResample:
+    """Resample an AUDIO stream to an explicit target rate.
+
+    The join-rate law (F12, 2026-11-12): MeliteConcatVideos refuses
+    members whose audio rates differ, and the H3 sound VAE emits at
+    32 kHz while the film standard is 48 kHz — every join leg states
+    its rate at the door instead of the concat guessing. Resampling
+    is the engine core's own bandlimited sinc (comfy.audio.resample,
+    the same kernel the loader path uses); an equal-rate input passes
+    through the SAME dict untouched (no filter, no copy drift — a
+    passthrough that resamples is a lie a green graph cannot see).
+    """
+
+    CATEGORY = "audio/melite"
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "resample_audio"
+    DESCRIPTION = "Resample an AUDIO stream to a target integer rate (engine-core bandlimited sinc; equal rate passes the SAME dict through untouched)."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "sample_rate": ("INT", {"default": 48000, "min": 1, "max": 768000,
+                                        "tooltip": "the join's stated rate — the film standard is 48000"}),
+            },
+        }
+
+    def resample_audio(self, audio: dict, sample_rate: int):
+        from comfy.audio import resample as _resample
+        sr, target = int(audio["sample_rate"]), int(sample_rate)
+        if sr == target:
+            return (audio,)
+        return ({"waveform": _resample(audio["waveform"], sr, target),
+                 "sample_rate": target},)
+
+
 class MeliteAudioDuck:
     """Duck (attenuate) an AUDIO stream during time spans.
 
@@ -1380,6 +1417,7 @@ NODE_CLASS_MAPPINGS = {
     "MeliteAudioSlice": MeliteAudioSlice,
     "MeliteAudioDelay": MeliteAudioDelay,
     "MeliteAudioMix": MeliteAudioMix,
+    "MeliteAudioResample": MeliteAudioResample,
     "MeliteAudioDuck": MeliteAudioDuck,
     "MeliteFilmAudioMix": MeliteFilmAudioMix,
     "MeliteQVoiceCopy": MeliteQVoiceCopy,
@@ -1397,6 +1435,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MeliteAudioSlice": "Melite Audio Slice",
     "MeliteAudioDelay": "Melite Audio Delay",
     "MeliteAudioMix": "Melite Audio Mix",
+    "MeliteAudioResample": "Melite Audio Resample",
     "MeliteAudioDuck": "Melite Audio Duck",
     "MeliteFilmAudioMix": "Melite Film Audio Mix",
     "MeliteQVoiceCopy": "Melite QVoice Copy",
