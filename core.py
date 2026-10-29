@@ -275,7 +275,73 @@ class ManagedModel:
     ComfyUI's scheduler so /free can clean up properly.
     """
 
-    _active_model: ManagedModel | None = None
+    # Keyed engine residency (the 2026-11-12 eviction cure): engines
+    # stay resident per (family, path, variant) so qwen3_tts and
+    # moss_sfx_v2 stop evicting each other on every alternation — the
+    # measured burn was a 55 s reload per flip (audit
+    # dev_docs/audits/moss-sfx-regression-2026-11-12.md §2 B6).
+    # Insertion-ordered (LRU by use); capped, with a free-VRAM guard
+    # at seat time. Torch engines stay UNregistered in ComfyUI model
+    # management exactly as before — /free and the studio-law yield
+    # (unload_all_models before a qwen3 torch load) are unchanged.
+    _engines: "dict[tuple[str, str, str], ManagedModel]" = {}
+    _ENGINE_RESIDENCY_CAP = 2
+    _RESIDENCY_HEADROOM_BYTES = 4 * 1024 * 1024 * 1024
+
+    def _engine_key(self) -> tuple[str, str, str]:
+        return (self.family, self.path, self._variant or "")
+
+    @classmethod
+    def _resident_engine_holder(
+        cls, key: tuple[str, str, str],
+    ) -> "ManagedModel | None":
+        holder = cls._engines.get(key)
+        if holder is not None and (
+            holder._torch_engine is not None or holder._session is not None
+        ):
+            cls._engines.pop(key)
+            cls._engines[key] = holder  # LRU refresh
+            return holder
+        cls._engines.pop(key, None)
+        return None
+
+    def _seat_resident(self) -> None:
+        cls = type(self)
+        key = self._engine_key()
+        cls._engines.pop(key, None)
+        cls._engines[key] = self
+        while len(cls._engines) > cls._ENGINE_RESIDENCY_CAP:
+            oldest_key = next(iter(cls._engines))
+            if oldest_key == key:
+                break
+            oldest = cls._engines.pop(oldest_key)
+            logger.info(
+                "evicting resident %s (residency cap)", oldest.family)
+            oldest._cleanup()
+        # Free-VRAM guard: two resident engines must leave headroom for
+        # the next load on the card — otherwise evict the other one.
+        if len(cls._engines) > 1:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    free, _total = torch.cuda.mem_get_info()
+                    if free < cls._RESIDENCY_HEADROOM_BYTES:
+                        for other_key in list(cls._engines):
+                            if other_key == key:
+                                continue
+                            other = cls._engines.pop(other_key)
+                            logger.info(
+                                "evicting resident %s (only %.1f GiB free)",
+                                other.family, free / (1024 ** 3))
+                            other._cleanup()
+                            break
+            except ImportError:
+                pass
+
+    def _drop_resident(self) -> None:
+        key = self._engine_key()
+        if type(self)._engines.get(key) is self:
+            type(self)._engines.pop(key, None)
 
     def __init__(
         self,
@@ -331,14 +397,11 @@ class ManagedModel:
         if self._session is not None:
             return True
 
-        # Hot path: reuse active session if family + path + variant match
-        active = ManagedModel._active_model
+        # Hot path: reuse resident session if family + path + variant match
+        active = ManagedModel._resident_engine_holder(self._engine_key())
         if (
             active is not None
             and active is not self
-            and active.family == self.family
-            and active.path == self.path
-            and active._variant == self._variant
             and active._session is not None
         ):
             self._session = active._session
@@ -349,11 +412,8 @@ class ManagedModel:
             )
             return True
 
-        # Cold path: destroy any previous session, create a new one
-        prev = ManagedModel._active_model
-        if prev is not None and prev is not self:
-            logger.info("unloading %s before loading %s", prev.family, self.family)
-            prev._cleanup()
+        # Cold path: create a new session (keyed residency keeps the
+        # other audio engines; the cap and VRAM guard own eviction)
 
         try:
             resolved_path = _resolve_model_file(
@@ -383,7 +443,7 @@ class ManagedModel:
                 model_spec_override=model_spec,
                 variant=self._variant or None,
             )
-            ManagedModel._active_model = self
+            self._seat_resident()
             self._register_in_model_management()
             logger.info(
                 "loaded %s from %s (variant=%r) natively",
@@ -413,13 +473,11 @@ class ManagedModel:
                 f"Use MOSS-SoundEffect-v2.0-src, got: {self.path}"
             )
 
-        # Hot path: reuse the active torch engine (same family + path)
-        active = ManagedModel._active_model
+        # Hot path: reuse the resident torch engine (exact family+path key)
+        active = ManagedModel._resident_engine_holder(self._engine_key())
         if (
             active is not None
             and active is not self
-            and active.family == self.family
-            and active.path == self.path
             and active._torch_engine is not None
         ):
             self._torch_engine = active._torch_engine
@@ -429,12 +487,8 @@ class ManagedModel:
             )
             return True
 
-        # Cold path: evict any previous model, then load the pipeline
-        prev = ManagedModel._active_model
-        if prev is not None and prev is not self:
-            logger.info("unloading %s before loading %s", prev.family, self.family)
-            prev._cleanup()
-
+        # Cold path: load the pipeline (keyed residency keeps the other
+        # audio engines resident — the cap and VRAM guard own eviction)
         try:
             from .engines.moss_sfx_v2 import TorchSfxEngine
 
@@ -447,7 +501,7 @@ class ManagedModel:
             if not loaded:
                 return False
             self._torch_engine = engine
-            ManagedModel._active_model = self
+            self._seat_resident()
             # No current_loaded_models registration: the pipeline is a plain
             # torch object — ComfyUI's gc + empty_cache manage its VRAM. The
             # AudiocoreLoadedModel protocol existed for the C++ session.
@@ -472,11 +526,6 @@ class ManagedModel:
         (the 2026-10-22 Triton burn): a staged ComfyUI model resident
         when the torch engine loads starves the allocator.
         """
-        prev = ManagedModel._active_model
-        if prev is not None and prev is not self:
-            logger.info(
-                "unloading %s before loading %s", prev.family, self.family)
-            prev._cleanup()
         try:
             import comfy.model_management as _mm
             _mm.unload_all_models()
@@ -493,7 +542,7 @@ class ManagedModel:
             if not loaded:
                 return False
             self._torch_engine = engine
-            ManagedModel._active_model = self
+            self._seat_resident()
             logger.info(
                 "loaded %s from %s (torch qwen3 engine)",
                 self.family, self.path)
@@ -541,8 +590,7 @@ class ManagedModel:
         if self._torch_engine is not None:
             self._torch_engine.unload()
             self._torch_engine = None
-        if ManagedModel._active_model is self:
-            ManagedModel._active_model = None
+        self._drop_resident()
         self._loaded_model_wrapper = None
         import gc
         gc.collect()
@@ -564,8 +612,7 @@ class ManagedModel:
         if self._torch_engine is not None:
             self._torch_engine.unload()
             self._torch_engine = None
-        if ManagedModel._active_model is self:
-            ManagedModel._active_model = None
+        self._drop_resident()
         import gc
         gc.collect()
         try:
@@ -780,17 +827,12 @@ class ManagedModel:
     def _ensure_loaded(self) -> None:
         if self._session is not None or self._torch_engine is not None:
             return
-        active = ManagedModel._active_model
-        if (
-            active is not None
-            and active.family == self.family
-            and active.path == self.path
-            and active._variant == self._variant
-        ):
+        active = ManagedModel._resident_engine_holder(self._engine_key())
+        if active is not None:
             if active._torch_engine is not None:
                 self._torch_engine = active._torch_engine
                 logger.info(
-                    "auto-recovered %s torch engine from active cache",
+                    "auto-recovered %s torch engine from resident cache",
                     self.family,
                 )
                 return

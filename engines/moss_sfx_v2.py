@@ -34,9 +34,14 @@ logger = logging.getLogger("audiocore.moss_sfx_v2")
 # The vendored pipeline package (MossSoundEffectPipeline + diffsynth).
 _IMPL_DIR = Path(__file__).resolve().parent / "moss_sfx_impl"
 
-# Official defaults for the diffusion loop (their engine node's tooltips).
-_DEFAULT_CFG_SCALE = 5.0
-_DEFAULT_INFERENCE_STEPS = 50
+# The sampling point every downstream surface pins (nodes.py
+# INPUT_TYPES, the kit autofill, the card schema — judged by the
+# moss-sfx-pipeline-truth wall). The old 5.0/50 was the inner
+# wan_audio layer's floor — half the step budget, over-guided (the
+# 2026-09-23 quality catch); these module constants are the residual
+# surface direct-API callers ride when no knob is stated.
+_DEFAULT_CFG_SCALE = 4.0
+_DEFAULT_INFERENCE_STEPS = 100
 _DEFAULT_SECONDS = 10.0
 _SIGMA_SHIFT = 5.0
 

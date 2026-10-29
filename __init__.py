@@ -34,9 +34,12 @@ from __future__ import annotations
 # AttributeError. Refuse the IMPORT instead, with the named remedy
 # (ComfyUI/Manager surface failed pack imports at boot). Same grammar
 # as install.py's sha256 gate and the allocator preflight.
-from .env_assert import assert_transformers_floor
+from .env_assert import assert_cuda_lane, assert_transformers_floor
 
 assert_transformers_floor()
+# The 2026-10-29 roar burn's "it ran on CPU" half: the moss pipeline
+# falls back to CPU silently at generate time — refuse at boot instead.
+assert_cuda_lane()
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 

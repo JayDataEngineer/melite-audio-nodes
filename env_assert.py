@@ -59,3 +59,31 @@ def assert_transformers_floor() -> None:
         raise RuntimeError(
             REMEDY.format(have=have, floor=TRANSFORMERS_FLOOR, ceil=TRANSFORMERS_CEILING)
         )
+
+
+CUDA_REMEDY = (
+    "melite-audio-nodes: no CUDA device is visible to this python env "
+    "(torch.cuda.is_available() is False). The audio lanes have no CPU "
+    "mode worth serving: the moss_sfx_v2 pipeline silently falls back to "
+    "CPU at generate time (pipeline_moss_soundeffect.py), turning every "
+    "run into a multi-minute crawl. Remedy: start the engine on a host "
+    "with the GPU visible (check nvidia-smi and CUDA_VISIBLE_DEVICES), "
+    "or stop loading this pack on CPU-only hosts."
+)
+
+
+def assert_cuda_lane() -> None:
+    """Refuse the pack import when the GPU lane is absent.
+
+    The 2026-10-29 roar burn's "it ran on CPU" half: nothing asserted
+    the device at boot, so a CUDA-less env served a silent CPU
+    fallback instead of a named refusal.
+
+    @raises RuntimeError with the named remedy when no CUDA device.
+    """
+    try:
+        import torch
+    except ImportError:
+        return  # the transformers floor already names a broken torch-less env
+    if not torch.cuda.is_available():
+        raise RuntimeError(CUDA_REMEDY)
