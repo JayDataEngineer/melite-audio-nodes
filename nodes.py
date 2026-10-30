@@ -1441,3 +1441,41 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MeliteQVoiceCopy": "Melite QVoice Copy",
     "MeliteLoudness": "Melite Loudness (LUFS)",
 }
+
+
+# ── NEW-3 (2026-11-12): the warmed-seat release door ─────────────────────
+# The estate's free door (comfy_manage free → POST /free) evicts only
+# ComfyUI-core-tracked models; the qwen3 torch engine's process-wide
+# warmed handles (~4.3 GB + graphs per variant) are engine-owned seats
+# invisible to it, and no estate door could feed the Unload node (it
+# needs an AUDIOCORE_MODEL handle no caller holds outside a run).
+# POST /audiocore/release_warmed fires the same release_warmed_handles()
+# the Unload node fires — the free door chains it after native /free.
+
+def _audiocore_release_warmed_command(request):
+    from .engines.qwen3_tts import release_warmed_handles
+
+    n = release_warmed_handles()
+    logger.info("audiocore/release_warmed: released %d warmed handle(s)", n)
+    return _audio_json_response({"released": n})
+
+
+def _audio_json_response(payload, status: int = 200):
+    from aiohttp import web
+
+    return web.json_response(payload, status=status)
+
+
+try:
+    from aiohttp import web as _audio_web
+except ImportError:
+    _audio_web = None
+try:
+    from server import PromptServer as _AudioPromptServer
+except ImportError:
+    _AudioPromptServer = None
+
+if (_audio_web is not None and _AudioPromptServer is not None and
+        getattr(_AudioPromptServer, "instance", None) is not None):
+    _AudioPromptServer.instance.routes.post("/audiocore/release_warmed")(
+        _audiocore_release_warmed_command)
