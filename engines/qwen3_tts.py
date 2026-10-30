@@ -198,8 +198,10 @@ def _require_load_headroom(hf_dir: str, variant: str) -> None:
             f"graphs/workspace {_LOAD_HEADROOM_BYTES / 1e9:.1f} GB). "
             f"The capture starves below this floor and dies as "
             f"'Pointer argument cannot be accessed from Triton'. "
-            f"Free the card (the Unload Audiocore Model node now "
-            f"also releases the warmed torch copy) and press again."
+            f"Free the card and press again: the estate's free door "
+            f"(comfy_manage free) chains /audiocore/release_warmed "
+            f"and drops these warmed torch seats too; the Unload "
+            f"Audiocore Model node releases them as well."
         )
     logger.info("qwen3_tts: load headroom ok (free %.1f GB >= need %.1f GB)",
                 free_b / 1e9, need / 1e9)
