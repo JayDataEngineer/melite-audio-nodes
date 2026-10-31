@@ -16,6 +16,18 @@ the engine's reuse cache — the CLONE lanes keep reading it). The copy
 is a plain file copy (no torch, no ffmpeg — never ffmpeg), loud on
 every miss: a voice the run cannot show it preserved is a finding,
 never a silent skip.
+
+THE FILENAME CONTRACT (F30): the copy's basename is ALWAYS the
+studio mint's own basename (newest ``<name>*.qvoice`` under the
+voices root) — the export filename and the consumer address agree
+because they are the SAME string. The run's UI receipt names it
+twice: ``voice_file`` (the filename the perform lane resolves) and
+``saved_qvoice_path`` (the absolute run-tree path the artifact
+harvest may serve). The consumer grammar lives estate-side
+(qvoice-cycle SKILL: ``qvoice: '<name>'`` resolves to
+``<voices-root>/<name>.qvoice``); this node guarantees the file
+that grammar names exists under the voices root by never renaming
+the mint.
 """
 
 from __future__ import annotations
@@ -146,6 +158,14 @@ class MeliteQVoiceCopy:
                 "reused_existing": [bool(reused_existing)],
                 "voice_file": [os.path.basename(source)],
                 "voice_mtime": [mtime],
+                # THE RUN-TREE ADDRESS (F30): the absolute path of the
+                # copy under the run's own output tree — a second
+                # servable address beside the studio's
+                # voices-root ``qvoice_path`` receipt (voices roots
+                # are model mounts; /view cannot fetch them). The
+                # export filename and the consumer address agree:
+                # the basename here IS the mint's basename.
+                "saved_qvoice_path": [target],
             },
             "result": (target,),
         }
