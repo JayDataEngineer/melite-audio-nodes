@@ -11,6 +11,10 @@ Exposes the full inference surface via NATIVE in-process loading
   - AudiocoreVoiceStudio — voice artifact authoring (uses qwen-tts Python directly)
   - MeliteAudioSlice — the audio-bed cut node (sample-grain slicing +
     silence-pad; the h3-timeline convenience layer's engine half)
+  - MeliteAudioTensorSlice — the conditioning tensor seat (the same
+    slice law over a WIRED AUDIO dict — the soundtrack merged-form
+    wire's stamped-window half; the file node's Combo seat cannot take
+    a producer link)
 - MeliteFilmAudioMix — the valve's second arm (2026-09-24): the film's
     post-generation audio mix (window files + positioned clips + duck
     spans, torch only — lives in film_mix.py, registered here)
@@ -1167,6 +1171,54 @@ class MeliteAudioSlice:
         return ({"waveform": cut, "sample_rate": sample_rate},)
 
 
+# ── MeliteAudioTensorSlice (the conditioning tensor seat — the h3-timeline
+# film loop's stamped windows, 2026-11-01). The soundtrack merged-form
+# wire's second half: a window that HEARS a wired producer's audio must
+# slice THAT producer's stream, and the file slice node cannot serve it —
+# its `audio` input is a Combo FILE seat validated against the live
+# input-dir listing, so a producer LINK can never land there (the submit
+# dies at type validation; a placeholder string dies at combo
+# membership). This node takes the AUDIO dict on a typed socket instead
+# (`audio_tensor`): the same sample-grain slice + silence-pad law as the
+# file node (start_seconds at the SOURCE's own rate, existing samples
+# bit-for-bit, the tail silence-padded to the requested duration), minus
+# folder_paths — the waveform arrives on the wire, never from a path.
+class MeliteAudioTensorSlice:
+    """Slice a wired AUDIO dict by seconds; pad silence to length."""
+
+    CATEGORY = "audio/melite"
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "slice_tensor_audio"
+    DESCRIPTION = "Cut a wired audio stream at start_seconds for duration_seconds, padding silence when the source runs short."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio_tensor": ("AUDIO",),
+                "start_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.01}),
+                "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.1, "step": 0.01}),
+            },
+        }
+
+    def slice_tensor_audio(self, audio_tensor: dict, start_seconds: float, duration_seconds: float):
+        if duration_seconds <= 0:
+            raise ValueError("MeliteAudioTensorSlice: duration_seconds must be positive")
+        waveform = audio_tensor["waveform"]
+        sample_rate = audio_tensor["sample_rate"]
+        # sample-grain slice (never a resample): start lands on the
+        # nearest sample at the SOURCE's own rate
+        expected = int(round(duration_seconds * sample_rate))
+        source_sample = int(round(max(0.0, start_seconds) * sample_rate))
+        source_sample = min(max(0, source_sample), int(waveform.shape[-1]))
+        cut = waveform[..., source_sample:source_sample + expected]
+        if cut.shape[-1] < expected:
+            # silence-pad: existing samples stay bit-for-bit, the
+            # tail fills to the legal duration
+            cut = torch.nn.functional.pad(cut, (0, expected - int(cut.shape[-1])))
+        return ({"waveform": cut, "sample_rate": sample_rate},)
+
+
 # ── MeliteAudioDelay + MeliteAudioMix (the clips-stitch engine half,
 # 2026-09-21 — the restore of the h3-timeline Music row's lost
 # consumer). Positioned dialogue/music clips must land in the RENDERED
@@ -1415,6 +1467,7 @@ NODE_CLASS_MAPPINGS = {
     "UnloadAudiocoreModel": UnloadAudiocoreModel,
     "AudiocoreFamilyInfo": AudiocoreFamilyInfo,
     "MeliteAudioSlice": MeliteAudioSlice,
+    "MeliteAudioTensorSlice": MeliteAudioTensorSlice,
     "MeliteAudioDelay": MeliteAudioDelay,
     "MeliteAudioMix": MeliteAudioMix,
     "MeliteAudioResample": MeliteAudioResample,
@@ -1433,6 +1486,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnloadAudiocoreModel": "Unload Audiocore Model",
     "AudiocoreFamilyInfo": "Audiocore Family Info",
     "MeliteAudioSlice": "Melite Audio Slice",
+    "MeliteAudioTensorSlice": "Melite Audio Tensor Slice",
     "MeliteAudioDelay": "Melite Audio Delay",
     "MeliteAudioMix": "Melite Audio Mix",
     "MeliteAudioResample": "Melite Audio Resample",
