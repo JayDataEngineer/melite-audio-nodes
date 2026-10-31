@@ -136,27 +136,20 @@ def _clip_candidate_trees(state_roots: str = "") -> list:
       submit-time walk stamps from the estate's roots manifest —
       call data, the same order every estate door searches, own root
       first);
-    - ``$MELITE_STATE_ROOT/output`` when this process's env names
-      the root, then every ``$MELITE_STATE_ROOTS`` extra's
-      ``output/`` (the operator's engine env — the estate retired
-      its own export, so on a lawful lane these arms only fire when
-      the OPERATOR named them);
     - the standard-install derivation: an engine living at
       ``<state>/runtime/comfyui`` has its runs root at
       ``<state>/runs/output`` (the estate's default layout — this
       derivation only ever ADDS a candidate; a miss refuses loud, so
       it can never smuggle a wrong file).
+
+    VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV
+    VARIABLES. The MELITE_STATE_ROOT / MELITE_STATE_ROOTS arms are
+    retired (the estate retired its own export long ago; the operator
+    seats roots by wiring ``state_roots``, never by env).
     """
     trees: list = []
     for root in _parse_state_roots(state_roots):
         trees.append(os.path.join(root, "output"))
-    env_root = os.environ.get("MELITE_STATE_ROOT", "").strip()
-    if env_root:
-        trees.append(os.path.join(env_root, "output"))
-    for extra in os.environ.get("MELITE_STATE_ROOTS", "").split(":"):
-        extra = extra.strip()
-        if extra:
-            trees.append(os.path.join(extra, "output"))
     cwd = os.getcwd()
     if os.path.basename(cwd) == "comfyui":
         trees.append(os.path.join(os.path.dirname(os.path.dirname(cwd)), "runs", "output"))

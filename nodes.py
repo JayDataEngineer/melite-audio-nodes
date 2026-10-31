@@ -742,7 +742,7 @@ class AudiocoreVoiceStudio:
                 }),
                 "voices_dir": ("STRING", {
                     "default": "",
-                    "placeholder": "/mnt/data/models/audio/voices (default)",
+                    "placeholder": "qvoice folder seat (default)",
                 }),
                 "qvoice_path": ("STRING", {
                     "default": "",

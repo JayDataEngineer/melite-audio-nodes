@@ -17,7 +17,6 @@ instance, no registration, no crash).
 """
 
 import importlib.util
-import os
 import sys
 import tempfile
 import types
@@ -30,11 +29,21 @@ PKG = "melite_audio_release_test"
 
 def _install_standalone_dirs():
     """The pack DECLARES its model folders (no defaults): outside
-    ComfyUI the test escape hatch is env vars — point both at temp
-    dirs so the import-time resolution succeeds."""
+    ComfyUI the test seats them by stubbing ComfyUI's folder_paths
+    module — point both categories at temp dirs so the import-time
+    resolution succeeds.
+
+    VENDOR RE-CURE (2026-11-01): the AUDIOCPP_MODELS_DIR /
+    QWEN3_HF_ROOT env escape hatch is retired — this stub is the seat
+    now (the pack never reads process env)."""
     tmp = tempfile.mkdtemp(prefix="melite-audio-release-test-")
-    os.environ.setdefault("AUDIOCPP_MODELS_DIR", tmp)
-    os.environ.setdefault("QWEN3_HF_ROOT", tmp)
+    folder_paths = types.ModuleType("folder_paths")
+    folder_paths.folder_names_and_paths = {
+        "audiocpp": ([tmp], {".gguf"}),
+        "qwen3_tts": ([tmp], set()),
+    }
+    folder_paths.get_folder_paths = lambda key: [tmp]
+    sys.modules["folder_paths"] = folder_paths
 
 
 _install_standalone_dirs()

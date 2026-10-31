@@ -573,7 +573,9 @@ class Qwen3TtsEngine:
         """
         from .. import qvoice as _qv
 
-        voices_dir = voices_dir or _qv.VOICE_DIR_DEFAULT
+        # VENDOR RE-CURE: the bank rides the wired path or the
+        # ``qvoice`` folder seat (never a literal, never env).
+        voices_dir = voices_dir or _qv.voices_home()
         os.makedirs(voices_dir, exist_ok=True)
         unique_name = _qv.next_available_name(name, voices_dir)
         out_path = os.path.join(voices_dir, unique_name + ".qvoice")
@@ -1522,8 +1524,9 @@ class Qwen3TtsEngine:
              (extra_model_paths.yaml — the `audiocpp` / `qwen3_tts` folders).
         """
         roots = [
-            resolve_model_folder("audiocpp", "AUDIOCPP_MODELS_DIR"),
-            resolve_model_folder("qwen3_tts", "QWEN3_HF_ROOT"),
+            # VENDOR RE-CURE: folder_paths categories only, never env.
+            resolve_model_folder("audiocpp"),
+            resolve_model_folder("qwen3_tts"),
         ]
 
         # Determine which variant to load.

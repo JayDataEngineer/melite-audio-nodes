@@ -35,17 +35,25 @@ _ESTATE_RUNTIME = (
 )
 
 
-def _find_native_lib() -> str:
-    """Resolve the path to libaudiocore_native.so."""
-    # 1. Explicit env var — an operator-built .so overrides everything
-    env_path = os.environ.get("AUDIOCORE_NATIVE_LIB")
-    if env_path and os.path.isfile(env_path):
-        return env_path
+def _find_native_lib(explicit: str = "") -> str:
+    """Resolve the path to libaudiocore_native.so.
+
+    VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV
+    VARIABLES. The AUDIOCORE_NATIVE_LIB override is retired: an
+    operator-built .so lands in the pack's own ``native/`` directory
+    (the install.py seat — checked first), never in process env.
+    ``explicit`` is the programmatic override (a wired path, not env).
+    """
+    # 1. Explicit path (a wired caller path, never env) — an
+    #    operator-built .so overrides everything.
+    if explicit.strip() and os.path.isfile(explicit.strip()):
+        return explicit.strip()
 
     # 2. The pack's own install.py landing — Manager runs it on
     #    install; it fetches + sha-verifies the pinned release asset
     #    into this pack's native/ directory. A plain ComfyUI with
     #    this pack Manager-installed converges here, estate or not.
+    #    An operator-built .so also lands here.
     pack_local = Path(__file__).resolve().parent / "native" / "libaudiocore_native.so"
     if pack_local.is_file():
         return str(pack_local)
@@ -61,10 +69,12 @@ def _find_native_lib() -> str:
             return str(p)
 
     raise RuntimeError(
-        "libaudiocore_native.so not found. The pack's install.py fetches\n"
-        "it (re-run the ComfyUI-Manager install), or set\n"
-        "AUDIOCORE_NATIVE_LIB to a .so you built.\n"
-        f"Checked: env AUDIOCORE_NATIVE_LIB, {pack_local}, {[str(c) for c in candidates]}"
+        "melite-audio-nodes: libaudiocore_native.so not found. The pack's "
+        "install.py fetches it (re-run the ComfyUI-Manager install), or "
+        "place an operator-built .so at the pack's native/ directory "
+        f"({pack_local}). (AUDIOCORE_NATIVE_LIB env is retired: this "
+        "pack never reads process env.) "
+        f"Checked: {pack_local}, {[str(c) for c in candidates]}"
     )
 
 

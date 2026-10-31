@@ -14,16 +14,16 @@ The .qvoice Voice Studio features (export/preview) use the qwen-tts Python
 package directly — they are development/authoring tools, not inference.
 
 Model folders are DECLARED, never hardcoded: the pack resolves them via
-ComfyUI's folder_paths, and plugins/melite-manager/manager/extra_model_paths.yaml
-is the single source of truth (`audiocpp` → engine GGUFs root, `qwen3_tts` →
-Voice Studio Python-engine HF source dirs). The env vars below are ONLY
-the standalone/test escape hatch OUTSIDE ComfyUI (no defaults — a folder
-that is neither declared nor overridden fails loud at import):
-
-    AUDIOCORE_NATIVE_LIB    — path to libaudiocore_native.so
-    AUDIOCPP_MODEL_SPECS_DIR — path to model_specs/ directory
-    AUDIOCPP_MODELS_DIR     — engine GGUFs root (standalone)
-    QWEN3_HF_ROOT           — Voice Studio HF source dirs root (standalone)
+ComfyUI's folder_paths, and the endpoint statement's extra_model_folders
+is the single source of truth (`audiocpp` → engine GGUFs root,
+`qwen3_tts` → Voice Studio Python-engine HF source dirs). VENDOR
+RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV VARIABLES: the
+old standalone/test env seats (AUDIOCORE_NATIVE_LIB,
+AUDIOCPP_MODEL_SPECS_DIR, AUDIOCPP_MODELS_DIR, QWEN3_HF_ROOT) are
+retired. An operator-built .so lands in the pack's native/ directory;
+model specs resolve by the model-path-anchored walk; tests stub the
+folder_paths module. A folder that is not seated fails loud at import,
+naming the category seat.
 """
 from __future__ import annotations
 

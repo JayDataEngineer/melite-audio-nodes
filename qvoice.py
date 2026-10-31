@@ -38,7 +38,39 @@ import struct
 import time
 from typing import Any, Literal
 
-VOICE_DIR_DEFAULT = "/mnt/data/models/audio/voices"
+# VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV
+# VARIABLES. The old VOICE_DIR_DEFAULT = "/mnt/data/..." literal is
+# retired: the voices bank rides ComfyUI's ``qvoice`` folder category
+# (the endpoint statement's extra_model_folders key → the provisioned
+# audio/voices store), or a wired caller path — never a literal, never
+# env. An unseated category with no explicit path refuses LOUD naming
+# the category seat.
+def voices_home(explicit: str = "") -> str:
+    """Resolve the voices bank: wired path wins, else the folder seat.
+
+    :param explicit: a wired caller path (node input override).
+    :returns: the bank directory.
+    :raises RuntimeError: naming the ``qvoice`` category seat when
+        neither source names a bank.
+    """
+    if (explicit or "").strip():
+        return (explicit or "").strip()
+    try:
+        import folder_paths
+        hits = folder_paths.get_folder_paths("qvoice")
+    except ImportError:
+        hits = []
+    if hits:
+        return hits[0]
+    raise RuntimeError(
+        "melite-audio-nodes: no voices bank — wire the voices path "
+        "input, or seat the 'qvoice' key in the endpoint statement's "
+        "extra_model_folders and regenerate "
+        "data/runtime/comfyui/extra_model_paths.yaml (node "
+        "--experimental-strip-types "
+        "packages/engines/comfyui-cordis/scripts/provision.ts paths)."
+    )
+
 
 MAGIC_LITE: bytes = b"QVOICE-LITE\x00\x00\x00\x00\x00"
 MAGIC_WDELTA: bytes = b"QVOICE-WDELTA\x00\x00\x00"
@@ -305,12 +337,14 @@ def read(path: str) -> dict[str, Any]:
 # ── Filesystem helpers ───────────────────────────────────────────────────
 
 
-def list_voices(voices_dir: str = VOICE_DIR_DEFAULT) -> list[dict[str, Any]]:
+def list_voices(voices_dir: str = "") -> list[dict[str, Any]]:
     """Enumerate .qvoice files in ``voices_dir``.
 
-    Returns a list of dicts with name, filename, path, size, kind,
-    created_at, sorted by name.
+    Empty ``voices_dir`` resolves via voices_home() (the wired path
+    or the ``qvoice`` folder seat). Returns a list of dicts with
+    name, filename, path, size, kind, created_at, sorted by name.
     """
+    voices_dir = voices_dir or voices_home()
     if not os.path.isdir(voices_dir):
         return []
     out: list[dict[str, Any]] = []
@@ -336,7 +370,7 @@ def list_voices(voices_dir: str = VOICE_DIR_DEFAULT) -> list[dict[str, Any]]:
 
 def resolve_voice_path(
     name_or_path: str,
-    voices_dir: str = VOICE_DIR_DEFAULT,
+    voices_dir: str = "",
 ) -> str:
     """Resolve a user-supplied voice reference to an absolute .qvoice path.
 
@@ -346,8 +380,9 @@ def resolve_voice_path(
       - Name with extension ("Cherry.qvoice") → same
 
     Rejects any name containing path separators or ``..`` — voice files
-    live ONLY inside ``voices_dir``.
+    live ONLY inside ``voices_dir`` (empty resolves via voices_home()).
     """
+    voices_dir = voices_dir or voices_home()
     if os.path.isabs(name_or_path) and os.path.isfile(name_or_path):
         return name_or_path
     base = name_or_path
@@ -363,10 +398,13 @@ def resolve_voice_path(
 
 def next_available_name(
     name: str,
-    voices_dir: str = VOICE_DIR_DEFAULT,
+    voices_dir: str = "",
     ext: str = ".qvoice",
 ) -> str:
-    """Auto-number on collision: ``foo`` → ``foo`` / ``foo_2`` / ``foo_3``."""
+    """Auto-number on collision: ``foo`` → ``foo`` / ``foo_2`` / ``foo_3``.
+
+    Empty ``voices_dir`` resolves via voices_home()."""
+    voices_dir = voices_dir or voices_home()
     if not os.path.isfile(os.path.join(voices_dir, name + ext)):
         return name
     seq = 2

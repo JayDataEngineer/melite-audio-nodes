@@ -35,9 +35,15 @@ from __future__ import annotations
 import os
 import shutil
 
-# The documented engine-side voices root (the runbook's VOICES ROOT).
-# Optional input overrides for nonstandard engine mounts.
-DEFAULT_VOICES_ROOT = "/mnt/data/models/audio/voices"
+from .qvoice import voices_home
+
+# VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV
+# VARIABLES. The old DEFAULT_VOICES_ROOT = "/mnt/data/..." literal is
+# retired: an empty ``voices_root`` input resolves via voices_home()
+# (the ``qvoice`` folder seat) at RUN time — an empty default is still
+# deliberate (a directory path defaultled into the graph is
+# unrepresentable to the source-echo guard), but the fallback lives in
+# the folder machinery, never in a literal.
 
 
 class MeliteQVoiceCopy:
@@ -60,7 +66,7 @@ class MeliteQVoiceCopy:
             "optional": {
                 "voices_root": ("STRING", {
                     "default": "",
-                    "tooltip": "Engine-side voices mount override. EMPTY = the documented root (/mnt/data/models/audio/voices) resolved at RUN time — an empty default is deliberate: a directory path defaultled into the graph is unrepresentable to the source-echo guard (attempt-018's finding: the whole design lane refused), so the fallback lives in the node, never in the graph",
+                    "tooltip": "Engine-side voices mount override. EMPTY = the qvoice folder seat resolved at RUN time — an empty default is deliberate: a directory path defaultled into the graph is unrepresentable to the source-echo guard (attempt-018's finding: the whole design lane refused), so the fallback lives in the folder machinery, never in the graph",
                 }),
             },
         }
@@ -78,11 +84,11 @@ class MeliteQVoiceCopy:
     OUTPUT_NODE = True
     TITLE = "Melite QVoice Copy (voice persists in the run tree)"
 
-    def copy_qvoice(self, voice_name, dest_prefix, audio, voices_root=DEFAULT_VOICES_ROOT):
+    def copy_qvoice(self, voice_name, dest_prefix, audio, voices_root=""):
         del audio  # ordering-only input — the studio's mint precedes us
         name = str(voice_name or "").strip()
         dest = str(dest_prefix or "").strip()
-        root = str(voices_root or "").strip() or DEFAULT_VOICES_ROOT
+        root = voices_home(str(voices_root or "").strip())
         if not name:
             raise RuntimeError(
                 "MeliteQVoiceCopy: voice_name is empty — the export's name is the search key, never a guess"

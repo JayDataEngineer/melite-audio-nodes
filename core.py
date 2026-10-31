@@ -82,9 +82,15 @@ _DIR_SCAN_FAMILIES = ("moss_sfx_v2",)
 # schemas.build_music_request (validated, extra='forbid', no silent drops).
 
 # Engine family specs (audiocpp-fork's model_specs/ — a sibling checkout,
-# NOT part of this repo). Env override only; empty = specs unavailable and
-# every consumer below degrades gracefully (spec={}, model_spec=None).
-_AUDIOCPP_MODEL_SPECS = os.environ.get("AUDIOCPP_MODEL_SPECS_DIR", "")
+# NOT part of this repo).
+#
+# VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV
+# VARIABLES. The AUDIOCPP_MODEL_SPECS_DIR override is retired: specs
+# resolve by the model-path-anchored walk below (the C++ loader's own
+# candidate walk, mirrored python-side). No spec found = specs
+# unavailable and every consumer below degrades gracefully
+# (spec={}, model_spec=None).
+_SPEC_WALK_MAX_DEPTH = 6
 
 # Spec discovery walk (transcript-016, 2026-09-24): the C++ loader's
 # discover_external_model_spec checks <model_path>/model_specs/<family>.json,
@@ -95,16 +101,11 @@ _AUDIOCPP_MODEL_SPECS = os.environ.get("AUDIOCPP_MODEL_SPECS_DIR", "")
 # tree (…/hf/model_specs/qwen3_tts.json). Mirror the C++ candidate walk
 # python-side over the RESOLVED model path's parents and hand the found
 # spec file to the session as model_spec_override (the loader accepts a
-# file or a directory). Bounded depth; the env override still wins.
-_SPEC_WALK_MAX_DEPTH = 6
+# file or a directory). Bounded depth. VENDOR RE-CURE: the walk is the
+# whole seat — no env override arm.
 
 
 def _discover_model_spec(family: str, model_path: str) -> Optional[str]:
-    if _AUDIOCPP_MODEL_SPECS:
-        candidate_dir = Path(_AUDIOCPP_MODEL_SPECS)
-        if candidate_dir.is_dir():
-            return str(candidate_dir)
-        return None
     # Path-style model inputs (a single weights file) anchor at the parent.
     anchor = Path(model_path)
     if anchor.suffix and not anchor.is_dir():
@@ -121,9 +122,15 @@ def _discover_model_spec(family: str, model_path: str) -> Optional[str]:
     return None
 
 
-def resolve_model_folder(folder_key: str, env_name: str) -> str:
-    """Resolve one of the pack's model folders DECLARATIVELY via ComfyUI's
-    folder_paths, falling back to an env var for standalone/test usage."""
+def resolve_model_folder(folder_key: str) -> str:
+    """Resolve one of the pack's model folders via ComfyUI's folder_paths.
+
+    VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER USE ENV
+    VARIABLES. The standalone/test env escape hatch is retired: the
+    folder_paths category of the same name is the only seat. Tests
+    stub the folder_paths module (sys.modules) instead of exporting
+    env vars. A missing seat refuses loud naming the category.
+    """
     try:
         import folder_paths
     except ImportError:
@@ -135,16 +142,19 @@ def resolve_model_folder(folder_key: str, env_name: str) -> str:
         paths = folder_paths.get_folder_paths(folder_key)
         if paths:
             return paths[0]
-    value = os.environ.get(env_name)
-    if value:
-        return value
     raise RuntimeError(
-        f"model folder {folder_key!r} is not declared: add it to ComfyUI's "
-        f"extra_model_paths.yaml or set {env_name} for standalone use"
+        f"melite-audio-nodes: model folder {folder_key!r} is not seated — "
+        f"add the {folder_key!r} key to the endpoint statement's "
+        f"extra_model_folders and regenerate "
+        f"data/runtime/comfyui/extra_model_paths.yaml (node "
+        f"--experimental-strip-types "
+        f"packages/engines/comfyui-cordis/scripts/provision.ts paths). "
+        f"(AUDIOCPP_MODELS_DIR / QWEN3_HF_ROOT env is retired: this "
+        f"pack never reads process env.)"
     )
 
 
-_AUDIOCPP_MODELS_DIR = resolve_model_folder("audiocpp", "AUDIOCPP_MODELS_DIR")
+_AUDIOCPP_MODELS_DIR = resolve_model_folder("audiocpp")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,12 +202,14 @@ def _resolve_model_file(
         return ggufs[0]
 
     # Multi-GGUF: read the family's model_spec for canonical filenames
+    # (the model-path-anchored walk — never env; see _discover_model_spec).
     spec: dict[str, Any] = {}
-    spec_path = (
-        Path(_AUDIOCPP_MODEL_SPECS) / f"{family}.json"
-        if _AUDIOCPP_MODEL_SPECS else None
-    )
-    if spec_path.is_file():
+    spec_hit = _discover_model_spec(family, model_path)
+    spec_path = None
+    if spec_hit:
+        hit = Path(spec_hit)
+        spec_path = hit if hit.is_file() else hit / f"{family}.json"
+    if spec_path is not None and spec_path.is_file():
         try:
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

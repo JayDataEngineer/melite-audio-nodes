@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import gc
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -89,9 +88,26 @@ class TorchSfxEngine:
             triton_dir = cache_root / "triton"
             inductor_dir.mkdir(parents=True, exist_ok=True)
             triton_dir.mkdir(parents=True, exist_ok=True)
-            os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
-            os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(inductor_dir))
-            os.environ.setdefault("TRITON_CACHE_DIR", str(triton_dir))
+            # VENDOR RE-CURE (2026-11-01) — COMFYUI EXTENSION NEVER
+            # USE ENV VARIABLES. The TORCHINDUCTOR_*/TRITON_CACHE_DIR
+            # env writes are retired: the same knobs ride torch's own
+            # inductor config object (in-process, no process env).
+            # Triton exposes no config knob for its cache dir, so its
+            # prepared dir is kept for the operator while triton uses
+            # its default cache — same persistence, already warm.
+            try:
+                import torch as _torch  # noqa: PLC0415
+
+                _cfg = getattr(
+                    getattr(_torch, "_inductor", None), "config", None
+                )
+                if _cfg is not None:
+                    if hasattr(_cfg, "fx_graph_cache"):
+                        _cfg.fx_graph_cache = True
+                    if hasattr(_cfg, "cache_dir"):
+                        _cfg.cache_dir = str(inductor_dir)
+            except Exception:
+                pass
             return cache_root
         except Exception as exc:  # pragma: no cover — env/filesystem edge
             logger.warning("moss_sfx_v2: compile cache setup failed: %s", exc)
