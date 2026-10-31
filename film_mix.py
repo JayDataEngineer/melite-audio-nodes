@@ -57,9 +57,23 @@ misplacement). A raw /v1/assets/runs or /melite-media/runs src that
 skipped the walk resolves against the estate's runs trees, named by
 the state_roots input FIRST (a JSON array of absolute state roots —
 Layer A's submit-time walk stamps it from the estate's roots
-manifest), then this process's MELITE_STATE_ROOT(S) env (the
-operator's own engine env — never the estate's), then the
-standard-install derivation.
+manifest), then the standard-install derivation. The env arms are
+RETIRED (2026-11-01 vendor re-cure — this pack never reads process
+env; see _clip_candidate_trees).
+
+WIRED-SEAT LAW (2026-11-01, the soundtrack merged-form wire — the
+one-way law GAPS-20 face #14's film tail): a clips_json row MAY omit
+src and carry ``wired: k`` (1 <= k <= WIRED_CLIP_SEATS) instead —
+the card seats that clip's ``$spell`` src on this node's optional
+wired_audio_k AUDIO input verbatim, the merge (rewriteSpells) lands
+the producer's link in that seat, and mix_film reads the SEAT's
+waveform instead of decoding a file. A path src keeps the staged-file
+handoff (the lawful estate boundary, unchanged); a ``$…`` src that
+reached the graph unseated refuses loud with the cure named
+(_resolve_clip_source). A wired row whose seat arrived unset refuses
+loud; a wired seat at a foreign sample rate refuses loud (the window
+decode law — a producer riding the wire is the film's own currency,
+never silently resampled).
 
 TWO HONEST DIVERGENCES from the retired tail (both improvements, both
 loud by construction):
@@ -93,6 +107,14 @@ _ATTACK_MS = 20.0
 _RELEASE_MS = 350.0
 
 _CLIP_CLASSES = ("dialogue", "sfx", "music")
+
+# THE WIRED-CLIP SEAT COUNT (2026-11-01, the soundtrack merged-form
+# wire): MeliteFilmAudioMix declares wired_audio_1..WIRED_CLIP_SEATS
+# optional AUDIO inputs; a clips_json row with ``wired: k`` in
+# 1..WIRED_CLIP_SEATS rides seat k instead of a staged file. The
+# compose (h3-timeline actions.ts mirrors this constant) refuses a
+# spelled clip beyond the seats loud — raise BOTH together.
+WIRED_CLIP_SEATS = 4
 
 
 def _resolve_output_prefix(prefix: str) -> str:
@@ -227,6 +249,21 @@ def _resolve_clip_source(src: str, state_roots: str = "") -> str:
             )
     if os.path.isabs(src) and os.path.isfile(src):
         return src
+    if src.startswith("$"):
+        # THE OLD PATH REDS IF REACHED, WITH THE FIX NAMED (the
+        # soundtrack merged-form wire, 2026-11-01): a $spell src in
+        # clips_json means the soundtrack wire never seated — the card
+        # embeds spelled rows as wired seats since the wire landed;
+        # a graph still carrying the spell in the JSON string predates
+        # it (or is hand-composed) and the merge had no seat to land
+        # the producer's link in.
+        raise RuntimeError(
+            f"MeliteFilmAudioMix: clip source {src!r} is a $spell — the "
+            f"soundtrack wire never seated (a spelled clip src names a "
+            f"producer, never a file): compose the wired seat (clips_json "
+            f"row wired: k + the producer linked into wired_audio_k) or "
+            f"run the producer first and paste its artifact path"
+        )
     raise RuntimeError(
         f"MeliteFilmAudioMix: clip source {src!r} resolves to no file "
         f"(staged input-dir name, estate asset URL, or absolute path — "
@@ -235,7 +272,15 @@ def _resolve_clip_source(src: str, state_roots: str = "") -> str:
 
 
 def _parse_clips(raw: str) -> list:
-    """clips_json → [{src, start_sec, dur_sec, class}] (doc order kept)."""
+    """clips_json → [{src | wired, start_sec, dur_sec, class}] (doc order kept).
+
+    THE WIRED-ROW LAW (2026-11-01): a row MAY omit src IFF it carries
+    ``wired: k`` with 1 <= k <= WIRED_CLIP_SEATS — the card seats that
+    clip's spelled src on the wired_audio_k input and the row rides the
+    seat (no src key, the JSON string is dead text to the merge). Any
+    other src-less row keeps the loud refusal verbatim; a row carrying
+    BOTH src and wired is ambiguous and refuses loud.
+    """
     try:
         rows = json.loads(raw or "[]")
     except json.JSONDecodeError as e:
@@ -251,8 +296,23 @@ def _parse_clips(raw: str) -> list:
         # shipped `isinstance(src)` — one argument — and killed the film at
         # node 47 with "isinstance expected 2 arguments, got 1". The type
         # argument was always the law.
-        if not isinstance(src, str) or not src.strip():
-            raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] has no src — never a silent misplacement")
+        has_src = isinstance(src, str) and bool(src.strip())
+        wired = row.get("wired")
+        if has_src and wired is not None:
+            raise RuntimeError(
+                f"MeliteFilmAudioMix: clips_json[{i}] carries BOTH src and "
+                f"wired — one source per row (wired: k takes the "
+                f"wired_audio_{wired!r} seat, src the staged file)"
+            )
+        if not has_src:
+            # THE WIRED-ROW ARM: only a wired: k row in 1..WIRED_CLIP_SEATS
+            # may omit src; everything else keeps the original refusal.
+            if (
+                not isinstance(wired, int)
+                or isinstance(wired, bool)
+                or not (1 <= wired <= WIRED_CLIP_SEATS)
+            ):
+                raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] has no src — never a silent misplacement")
         try:
             start = float(row.get("start_sec", 0.0))
             dur = float(row.get("dur_sec", 0.0))
@@ -265,7 +325,10 @@ def _parse_clips(raw: str) -> list:
             raise RuntimeError(
                 f"MeliteFilmAudioMix: clips_json[{i}] unknown class {cls!r} — dialogue | sfx | music"
             )
-        clips.append({"src": src.strip(), "start_sec": start, "dur_sec": dur, "class": cls})
+        if has_src:
+            clips.append({"src": src.strip(), "start_sec": start, "dur_sec": dur, "class": cls})
+        else:
+            clips.append({"wired": wired, "start_sec": start, "dur_sec": dur, "class": cls})
     return clips
 
 
@@ -291,6 +354,19 @@ class MeliteFilmAudioMix:
                     "multiline": False,
                     "tooltip": 'JSON array of absolute state roots (["/abs/root", ...]) — Layer A\'s submit-time walk stamps the estate\'s roots manifest here; the clip-source walk searches these output/ trees before any env arm',
                 }),
+                # THE WIRED SOUNDTRACK SEATS (2026-11-01, the soundtrack
+                # merged-form wire): AUDIO is a typed socket, so a link
+                # validates AUDIO→AUDIO at submit; an absent optional
+                # input skips validation. The card seats a spelled clip
+                # src on wired_audio_k verbatim and the merge lands the
+                # producer's link there — the manifest row carries
+                # `wired: k`, never src.
+                **{
+                    f"wired_audio_{k}": ("AUDIO", {
+                        "tooltip": f"Optional wired soundtrack seat {k} — the producer's AUDIO tensor for the clips_json row carrying wired: {k} (the merge lands the upstream link here)",
+                    })
+                    for k in range(1, WIRED_CLIP_SEATS + 1)
+                },
             },
             "required": {
                 "videos": ("STRING", {
@@ -304,7 +380,7 @@ class MeliteFilmAudioMix:
                 "clips_json": ("STRING", {
                     "default": "[]",
                     "multiline": True,
-                    "tooltip": 'JSON array of {src, start_sec, dur_sec, class} — the card renders the filmMix manifest here verbatim',
+                    "tooltip": 'JSON array of {src | wired, start_sec, dur_sec, class} — the card renders the filmMix manifest here verbatim; a wired: k row rides the wired_audio_k seat instead of a file',
                 }),
                 "duck_spans": ("STRING", {
                     "default": "",
@@ -337,6 +413,10 @@ class MeliteFilmAudioMix:
         duck_db: float,
         film_seconds: float,
         state_roots: str = "",
+        wired_audio_1=None,
+        wired_audio_2=None,
+        wired_audio_3=None,
+        wired_audio_4=None,
     ):
         # the engine half lives in .nodes (Delay/Mix/Duck + the PyAV
         # decode law) — imported HERE, not at module top: nodes.py
@@ -360,6 +440,26 @@ class MeliteFilmAudioMix:
                 "MeliteFilmAudioMix: film_seconds must be positive — the output fits the film exactly"
             )
         clips = _parse_clips(clips_json)
+
+        # THE WIRED SEATS (the soundtrack merged-form wire): a
+        # clips_json row with `wired: k` reads seat k's AUDIO dict —
+        # the merge landed the producer's link there. A wired row
+        # whose seat arrived unset refuses loud (the compose promised
+        # a producer; a hand-composed graph or a seat the merge never
+        # filled must not silently drop the row's voice).
+        wired_seats: dict = {}
+        for k, seat in ((1, wired_audio_1), (2, wired_audio_2), (3, wired_audio_3), (4, wired_audio_4)):
+            if seat is not None:
+                wired_seats[k] = seat
+        for clip in clips:
+            k = clip.get("wired")
+            if k is not None and k not in wired_seats:
+                raise RuntimeError(
+                    f"MeliteFilmAudioMix: clips_json row wired: {k} has no "
+                    f"wired_audio_{k} input — the spelled soundtrack's seat "
+                    f"never landed (wire the producer's AUDIO output into "
+                    f"wired_audio_{k})"
+                )
 
         # 1. THE GENERATED TRACK: decode every window file, refuse rate
         #    drift (never a silent resample — the concat's own law),
@@ -414,11 +514,32 @@ class MeliteFilmAudioMix:
         #    music sub-bus (doc order, 'base'), ducked under voice
         #    spans only, joined last. duration fit = round(seat+dur to
         #    ms); dur 0 = unfitted (the card's own law, both arms).
+        #    THE SEAT SOURCE (the wired-seat law): a wired row reads
+        #    its seat's waveform + sample rate instead of decoding a
+        #    file; a wired seat at a foreign rate refuses loud (the
+        #    window decode law — the windows refuse rate drift, a
+        #    wired producer rides the film's own clock, never a
+        #    silent resample).
+        def seat_source(clip: dict) -> dict:
+            k = clip.get("wired")
+            if k is None:
+                waveform, sr = load_audio_file(_resolve_clip_source(clip["src"], state_roots))
+                return {"waveform": waveform, "sample_rate": int(sr)}
+            seat = wired_seats[k]
+            sr = int(seat["sample_rate"])
+            if sr != base_sr:
+                raise RuntimeError(
+                    f"MeliteFilmAudioMix: wired seat {k} samples at "
+                    f"{sr}Hz but the film runs {base_sr}Hz — a wired "
+                    f"producer rides the film's own clock (the window "
+                    f"decode law; every window shares the rate)"
+                )
+            return {"waveform": seat["waveform"], "sample_rate": sr}
+
         for clip in clips:
             if clip["class"] == "music":
                 continue
-            waveform, sr = load_audio_file(_resolve_clip_source(clip["src"], state_roots))
-            loaded = {"waveform": waveform, "sample_rate": int(sr)}
+            loaded = seat_source(clip)
             placed = delay.delay_audio(
                 loaded,
                 delay_seconds=float(clip["start_sec"]),
@@ -431,8 +552,7 @@ class MeliteFilmAudioMix:
         for clip in clips:
             if clip["class"] != "music":
                 continue
-            waveform, sr = load_audio_file(_resolve_clip_source(clip["src"], state_roots))
-            loaded = {"waveform": waveform, "sample_rate": int(sr)}
+            loaded = seat_source(clip)
             placed = delay.delay_audio(
                 loaded,
                 delay_seconds=float(clip["start_sec"]),
