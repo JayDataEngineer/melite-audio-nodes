@@ -950,9 +950,22 @@ class Qwen3TtsEngine:
         1.0 → exactly the saved embedding (zero delta: the voice LOCK is
         bit-identical, the short-circuit below makes that true by
         construction), < 1 pulls toward the bank's neutral voice, > 1
-        exaggerates. The conditioning delta is |s-1| * ||emb - neutral||
-        — a fraction of the embedding norm — so the render stays the same
-        performance with the timbre measurably shifted.
+        exaggerates — the identity scale the card documents.
+
+        THE RENDER TRUTH (the live receipt, 2026-11-01): the speaker
+        embedding sits in the talker's codec prefill (qwen_tts
+        core/models/modeling_qwen3_tts.py generate loop), so ANY
+        conditioning move re-samples the code stream — the performance
+        re-rolls at every strength ≠ 1, at every sampling temperature,
+        at every steering magnitude (measured: decoded-PCM corr ≈ 0 for
+        0.9-vs-1.1, for 0.5-vs-1.4, at temperature 0.9 AND 0.05; the
+        same voice re-rendered at a different seed also corr ≈ 0 — raw
+        PCM correlation is a bit-identity detector here, not a
+        similarity metric; the seed-locked same-graph control is
+        bit-identical). The steering law therefore buys a MEANINGFUL
+        timbre axis — the voice actually moves toward neutral /
+        exaggerates — not a locked performance; that is the honest
+        semantic the docs state.
 
         No bank mean (empty/foreign-dim bank) degrades to identity with a
         loud warning: strength rides as 1.0, never a silent re-roll.
