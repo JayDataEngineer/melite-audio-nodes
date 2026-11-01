@@ -34,6 +34,11 @@ from ..core import resolve_model_folder
 
 logger = logging.getLogger("audiocore.qwen3_tts")
 
+# The voices-bank neutral cache (the F51 identity steering): bank dir +
+# dim → (newest .qvoice mtime, mean embedding | None). Refreshed when the
+# bank's file set changes; entries are small (one vector per bank).
+_BANK_NEUTRAL_CACHE: dict[tuple[str, int], tuple[float, Any]] = {}
+
 
 def _tolerant_default_rope_parameters(config, device=None, seq_len=None,
                                       layer_type=None):
@@ -861,6 +866,118 @@ class Qwen3TtsEngine:
 
     # ── Voice Studio internals ──────────────────────────────────────────
 
+    def _bank_neutral_embedding(self, emb: Any, qvoice_path: str) -> Any:
+        """The voices-bank mean speaker embedding — the 'neutral' anchor.
+
+        The bank is the rendered artifact's own directory; every readable
+        lite .qvoice sibling donates its items' ref_spk_embedding at THIS
+        voice's dimension (a foreign checkpoint's artifact, a wdelta, or
+        an unreadable file is not a bank member — skipped, never fatal).
+        x-vector mean normalization: the average voice is the neutral the
+        docs promise ("below 1 pulls toward neutral").
+
+        Cached per (bank dir, dim) until the bank's newest mtime moves, so
+        a long-lived ComfyUI process does not re-read the bank per render.
+
+        :param emb: this voice's speaker embedding (the dim probe).
+        :param qvoice_path: the rendered artifact (its dir IS the bank).
+        :returns: the mean embedding tensor, or None when no same-dim
+            sibling embedding is readable (the caller rides identity).
+        """
+        import torch
+        from .. import qvoice as _qv
+
+        try:
+            dim = int(tuple(emb.shape)[-1]) if isinstance(emb, torch.Tensor) else len(emb)
+        except Exception:
+            return None
+        bank = os.path.dirname(qvoice_path) or "."
+        try:
+            entries = sorted(os.listdir(bank))
+        except OSError:
+            return None
+        newest = 0.0
+        for name in entries:
+            if name.endswith(".qvoice"):
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(bank, name)))
+                except OSError:
+                    pass
+        key = (bank, dim)
+        cached = _BANK_NEUTRAL_CACHE.get(key)
+        if cached is not None and cached[0] == newest:
+            return cached[1]
+        acc = None
+        count = 0
+        for name in entries:
+            if not name.endswith(".qvoice"):
+                continue
+            try:
+                payload = _qv.read_lite(os.path.join(bank, name))
+            except Exception:
+                continue
+            for item in (payload.get("items") or []):
+                vec = (item or {}).get("ref_spk_embedding")
+                if vec is None:
+                    continue
+                if not isinstance(vec, torch.Tensor):
+                    try:
+                        vec = torch.tensor(vec, dtype=torch.float32)
+                    except Exception:
+                        continue
+                if vec.numel() != dim:
+                    continue
+                vec = vec.reshape(-1).to(torch.float32)
+                acc = vec.clone() if acc is None else acc + vec
+                count += 1
+        mean = None if acc is None or count == 0 else (acc / count).to(torch.float32)
+        _BANK_NEUTRAL_CACHE[key] = (newest, mean)
+        return mean
+
+    def _steer_identity_strength(self, emb: Any, strength: float,
+                                 qvoice_path: str) -> Any:
+        """voice_strength as an IDENTITY SCALE — the F51 cure (2026-11-01).
+
+        The old ``emb * strength`` rescaled the raw embedding, and the
+        codec-conditioned clone pipeline answered a 0.5x / 1.4x embedding
+        with a wholesale new performance (locked-seed corr 0.10 — the
+        audit's F51 re-roll). The PCA steering law (AudiocoreTTS
+        ``voice_pca_strengths``: ``emb + direction * strength``) is the
+        mechanism instead: steer along the voice's own identity axis —
+
+            steered = neutral + (emb - neutral) * strength
+
+        1.0 → exactly the saved embedding (zero delta: the voice LOCK is
+        bit-identical, the short-circuit below makes that true by
+        construction), < 1 pulls toward the bank's neutral voice, > 1
+        exaggerates. The conditioning delta is |s-1| * ||emb - neutral||
+        — a fraction of the embedding norm — so the render stays the same
+        performance with the timbre measurably shifted.
+
+        No bank mean (empty/foreign-dim bank) degrades to identity with a
+        loud warning: strength rides as 1.0, never a silent re-roll.
+
+        :param emb: the item's speaker embedding.
+        :param strength: the card's voice_strength (already clamped 0..2).
+        :param qvoice_path: the artifact (its dir is the neutral's bank).
+        :returns: the steered embedding (the input object at 1.0 / degrade).
+        """
+        import torch
+        if strength == 1.0:
+            return emb
+        if isinstance(emb, torch.Tensor):
+            emb = emb.to(torch.float32)
+        neutral = self._bank_neutral_embedding(emb, qvoice_path)
+        if neutral is None:
+            logger.warning(
+                "preview_voice: no bank mean for %s (empty or foreign-dim "
+                "voices bank) — voice_strength %.2f rides as 1.0 (identity), "
+                "never a re-roll.",
+                qvoice_path, strength,
+            )
+            return emb
+        return neutral + (emb - neutral) * strength
+
     def _preview_lite(
         self, qvoice_path: str, text: str, instruct: str,
         lang: str, gen_kwargs: dict[str, Any], strength: float,
@@ -892,16 +1009,17 @@ class Qwen3TtsEngine:
                 "preview_voice: lite qvoice has no items — re-export."
             )
 
-        # Reconstruct VoiceClonePromptItem list. Apply voice_strength by
-        # scaling the embedding's L2 distance from zero (uniform magnitude
-        # scaling — preserves direction, modulates identity intensity).
+        # Reconstruct VoiceClonePromptItem list. Apply voice_strength as
+        # an identity scale (the F51 cure): steer each embedding along
+        # its deviation from the bank's neutral voice — never the raw
+        # `emb * strength` rescale that re-rolled the whole performance.
         items: list[Any] = []
         for raw in items_raw:
             emb = raw.get("ref_spk_embedding")
             if emb is not None and strength != 1.0:
                 if not isinstance(emb, torch.Tensor):
                     emb = torch.tensor(emb, dtype=torch.float32)
-                emb = emb * strength
+                emb = self._steer_identity_strength(emb, strength, qvoice_path)
             items.append(VoiceClonePromptItem(
                 ref_code=raw.get("ref_code"),
                 ref_spk_embedding=emb,
@@ -985,13 +1103,16 @@ class Qwen3TtsEngine:
             )
 
         if items:
-            # Apply voice_strength to the embedding tensor.
+            # Apply voice_strength as an identity scale (the F51 cure):
+            # the same bank-neutral steering the lite path rides — never
+            # the raw rescale that re-rolled the performance.
             if strength != 1.0:
                 import torch
                 for it in items:
                     emb = getattr(it, "ref_spk_embedding", None)
                     if isinstance(emb, torch.Tensor):
-                        it.ref_spk_embedding = emb * strength
+                        it.ref_spk_embedding = self._steer_identity_strength(
+                            emb, strength, qvoice_path)
             audios, sr = self.model.generate_voice_clone(
                 text=text, language=lang,
                 voice_clone_prompt=items, **gen,

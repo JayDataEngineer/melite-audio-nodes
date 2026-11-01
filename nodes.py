@@ -533,6 +533,16 @@ class AudiocoreTTS:
                     "default": "",
                     "placeholder": "transcript of reference_audio",
                 }),
+                # OPTIONAL, not required (the F50 cure, 2026-11-01): the
+                # node never demanded a speaker — "" rides and the
+                # engine's own voice-source gate refuses LOUD when a
+                # CustomVoice take carries no speaker/voice source at
+                # all. The old REQUIRED seat invented a phantom the card
+                # never declares (the tts card's seat is `voice`,
+                # visible_when qvoice=null) and every surface that reads
+                # the raw node schema rendered a field compose never
+                # sends. One honest block: required = what the node
+                # actually demands.
                 "speaker_name": ("STRING", {"default": ""}),
                 "instruct": ("STRING", {
                     "default": "",
@@ -778,6 +788,17 @@ class AudiocoreVoiceStudio:
                 }),
                 "voice_strength": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": (
+                        "Identity scale of the loaded persona (the F51 "
+                        "cure, 2026-11-01): steered = bank-neutral + "
+                        "(embedding - bank-neutral) * strength — the PCA "
+                        "steering law, never a raw rescale. 1.0 = the "
+                        "saved voice bit-identical (the lock), < 1 pulls "
+                        "toward the voices bank's neutral voice, > 1 "
+                        "exaggerates. With no computable bank mean this "
+                        "rides as 1.0 (identity, loud warning) — it never "
+                        "re-rolls the performance."
+                    ),
                 }),
                 "speed": ("FLOAT", {
                     "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.05,
