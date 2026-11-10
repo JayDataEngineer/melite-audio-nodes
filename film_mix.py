@@ -271,8 +271,31 @@ def _resolve_clip_source(src: str, state_roots: str = "") -> str:
     )
 
 
+def _trim_source_head(loaded: dict, clip: dict) -> dict:
+    """THE CLIPPING LANE (2026-11-17): in_sec is the SOURCE in-point —
+    where in the file the clip starts. The head trim happens BEFORE
+    the delay seat, so the overlay plays [in_sec, in_sec+dur_sec] at
+    the film seat: the same segment the card's conditioning slice
+    played (the model hears what the film plays). A row without
+    in_sec (or 0) keeps the head — byte-identical to every mix
+    composed before the lane existed. A source shorter than the
+    in-point yields silence for the span; the delay pads the rest.
+    """
+    in_sec = float(clip.get("in_sec", 0.0))
+    if in_sec <= 0.0:
+        return loaded
+    wf = loaded["waveform"]
+    sr = int(loaded["sample_rate"])
+    at = int(round(in_sec * sr))
+    if at >= wf.shape[-1]:
+        wf = wf[..., :0]
+    else:
+        wf = wf[..., at:]
+    return {"waveform": wf, "sample_rate": sr}
+
+
 def _parse_clips(raw: str) -> list:
-    """clips_json → [{src | wired, start_sec, dur_sec, class}] (doc order kept).
+    """clips_json → [{src | wired, start_sec, dur_sec, in_sec?, class}] (doc order kept).
 
     THE WIRED-ROW LAW (2026-11-01): a row MAY omit src IFF it carries
     ``wired: k`` with 1 <= k <= WIRED_CLIP_SEATS — the card seats that
@@ -316,19 +339,22 @@ def _parse_clips(raw: str) -> list:
         try:
             start = float(row.get("start_sec", 0.0))
             dur = float(row.get("dur_sec", 0.0))
+            in_sec = float(row.get("in_sec", 0.0))
         except (TypeError, ValueError):
             raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] needs numeric start_sec/dur_sec")
         if not (start >= 0.0) or not (dur >= 0.0):
             raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] needs start_sec >= 0, dur_sec >= 0")
+        if not (in_sec >= 0.0):
+            raise RuntimeError(f"MeliteFilmAudioMix: clips_json[{i}] needs in_sec >= 0 (the source in-point)")
         cls = str(row.get("class", "dialogue")).strip().lower()
         if cls not in _CLIP_CLASSES:
             raise RuntimeError(
                 f"MeliteFilmAudioMix: clips_json[{i}] unknown class {cls!r} — dialogue | sfx | music"
             )
         if has_src:
-            clips.append({"src": src.strip(), "start_sec": start, "dur_sec": dur, "class": cls})
+            clips.append({"src": src.strip(), "start_sec": start, "dur_sec": dur, "in_sec": in_sec, "class": cls})
         else:
-            clips.append({"wired": wired, "start_sec": start, "dur_sec": dur, "class": cls})
+            clips.append({"wired": wired, "start_sec": start, "dur_sec": dur, "in_sec": in_sec, "class": cls})
     return clips
 
 
@@ -380,7 +406,7 @@ class MeliteFilmAudioMix:
                 "clips_json": ("STRING", {
                     "default": "[]",
                     "multiline": True,
-                    "tooltip": 'JSON array of {src | wired, start_sec, dur_sec, class} — the card renders the filmMix manifest here verbatim; a wired: k row rides the wired_audio_k seat instead of a file',
+                    "tooltip": 'JSON array of {src | wired, start_sec, dur_sec, in_sec?, class} — the card renders the filmMix manifest here verbatim; a wired: k row rides the wired_audio_k seat instead of a file; in_sec (optional, default 0) is the source in-point — the overlay plays [in_sec, in_sec+dur_sec], the segment the conditioning slice played',
                 }),
                 "duck_spans": ("STRING", {
                     "default": "",
@@ -540,6 +566,7 @@ class MeliteFilmAudioMix:
             if clip["class"] == "music":
                 continue
             loaded = seat_source(clip)
+            loaded = _trim_source_head(loaded, clip)
             placed = delay.delay_audio(
                 loaded,
                 delay_seconds=float(clip["start_sec"]),
@@ -553,6 +580,7 @@ class MeliteFilmAudioMix:
             if clip["class"] != "music":
                 continue
             loaded = seat_source(clip)
+            loaded = _trim_source_head(loaded, clip)
             placed = delay.delay_audio(
                 loaded,
                 delay_seconds=float(clip["start_sec"]),
