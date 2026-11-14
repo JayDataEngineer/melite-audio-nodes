@@ -100,22 +100,28 @@ def _tolerant_default_rope_parameters(config, device=None, seq_len=None,
 
 @contextlib.contextmanager
 def _rope_registry_patched():
-    """The load-scoped RoPE patch (engine audit 2026-11-14, D1).
+    """The load-scoped RoPE patch (engine audit 2026-11-14, D1; the
+    20:56 cold-boot burn, D5).
 
     Installs the tolerant ``"default"`` initializer around ONE
     ``from_pretrained`` call, then restores whatever entry was live
     before (qwen_tts's own, since its import already re-seated the
-    registry) — the override never leaks past the load. The restored
-    entry is read BEFORE the patch, so nesting and repeated loads are
-    safe.
+    registry) — the override never leaks past the load. The entry is
+    read WITHOUT assuming it exists: a cold interpreter may carry no
+    ``"default"`` seat yet (the D5 ``KeyError('default')`` fired at
+    exactly this read), so absent restores to absent — nesting and
+    repeated loads stay safe warm and cold.
     """
     from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-    saved = ROPE_INIT_FUNCTIONS["default"]
+    saved = ROPE_INIT_FUNCTIONS.get("default")
     ROPE_INIT_FUNCTIONS["default"] = _tolerant_default_rope_parameters
     try:
         yield
     finally:
-        ROPE_INIT_FUNCTIONS["default"] = saved
+        if saved is None:
+            ROPE_INIT_FUNCTIONS.pop("default", None)
+        else:
+            ROPE_INIT_FUNCTIONS["default"] = saved
 
 
 def _assert_mimi_rope(handle: Any) -> None:
