@@ -25,6 +25,7 @@ Voice Studio extensions (export / preview / load_qvoice) implement the
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import tempfile
@@ -50,12 +51,26 @@ def _tolerant_default_rope_parameters(config, device=None, seq_len=None,
     RoPE params in ``rope_parameters`` instead — so the first weight load
     crashes in ``initialize_weights`` with
     ``AttributeError: 'MimiConfig' object has no attribute 'rope_theta'``.
-    That init is throwaway: qwen's ``from_pretrained`` rebuilds every
-    ``inv_freq`` buffer via ``restore_rope_buffers`` after the load. This
-    wrapper delegates to qwen's exact math for normal configs and falls back
-    to ``rope_parameters["rope_theta"]`` (else 10000.0, the transformers
-    default theta) only for configs that lack ``rope_theta`` — same shape,
-    same buffers, load proceeds to the restore.
+
+    THIS INIT IS **NOT** THROWAWAY FOR MIMI (engine audit 2026-11-14, D1 —
+    the old docstring claimed qwen's ``from_pretrained`` rebuilds every
+    ``inv_freq`` via ``restore_rope_buffers``; false for the exact model
+    this protects): ``restore_rope_buffers`` only rebuilds modules
+    carrying BOTH ``rope_init_fn`` AND ``inv_freq``, and transformers'
+    ``MimiRotaryEmbedding`` keeps ``rope_init_fn`` as a local variable —
+    so the codec's rope is NEVER restored, and this function's output IS
+    the final Mimi rope state at decode time (``inv_freq`` is a
+    non-persistent buffer, absent from the safetensors). The REAL
+    invariant: the fallback math below must equal transformers' own
+    ``MimiRotaryEmbedding.compute_default_rope_parameters`` — same
+    ``rope_parameters["rope_theta"]`` base, same
+    ``head_dim * partial_rotary_factor`` dim, ``attention_factor`` 1.0 —
+    and :func:`_assert_mimi_rope` refuses the load when it does not.
+    This wrapper delegates to qwen's exact math for normal configs and
+    falls back to ``rope_parameters["rope_theta"]`` (else 10000.0, the
+    transformers default theta) only for configs that lack
+    ``rope_theta`` — same shape, same buffers, load proceeds to the
+    codec decode.
     """
     from qwen_tts import _transformers_compat as _qt_compat
     try:
@@ -83,16 +98,76 @@ def _tolerant_default_rope_parameters(config, device=None, seq_len=None,
     return inv_freq, 1.0
 
 
-def _ensure_rope_registry() -> None:
-    """Point the transformers RoPE registry at the tolerant initializer.
+@contextlib.contextmanager
+def _rope_registry_patched():
+    """The load-scoped RoPE patch (engine audit 2026-11-14, D1).
 
-    qwen_tts patches ``ROPE_INIT_FUNCTIONS["default"]`` at import with its
-    ``rope_theta``-assuming version; overwrite that entry AFTER the import
-    so Mimi-config loads (speech tokenizer, every variant) survive
-    ``initialize_weights``. Idempotent — plain dict assignment.
+    Installs the tolerant ``"default"`` initializer around ONE
+    ``from_pretrained`` call, then restores whatever entry was live
+    before (qwen_tts's own, since its import already re-seated the
+    registry) — the override never leaks past the load. The restored
+    entry is read BEFORE the patch, so nesting and repeated loads are
+    safe.
     """
     from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+    saved = ROPE_INIT_FUNCTIONS["default"]
     ROPE_INIT_FUNCTIONS["default"] = _tolerant_default_rope_parameters
+    try:
+        yield
+    finally:
+        ROPE_INIT_FUNCTIONS["default"] = saved
+
+
+def _assert_mimi_rope(handle: Any) -> None:
+    """Refuse LOUD when the codec's loaded rope diverges from the
+    transformers math (engine audit 2026-11-14, D1 arm 4).
+
+    The tolerant initializer's output IS the final Mimi rope state:
+    ``restore_rope_buffers`` never touches the codec (transformers'
+    ``MimiRotaryEmbedding`` keeps ``rope_init_fn`` as a local variable,
+    not ``self.rope_init_fn``), and ``inv_freq`` is a non-persistent
+    buffer absent from the safetensors — so nothing overwrites it after
+    the load. The invariant this asserts: every loaded codec rope
+    module's ``inv_freq`` equals transformers' own
+    ``MimiRotaryEmbedding.compute_default_rope_parameters`` on that
+    module's config. A checkpoint whose true theta differs from the
+    fallback, or a future transformers math change, turns from silent
+    texture corruption into this refusal. Zero rope modules found is
+    also loud — that is drift, not health.
+    """
+    import torch
+    from transformers.models.mimi import modeling_mimi
+    tokenizer = getattr(handle, "speech_tokenizer", None)
+    if tokenizer is None:
+        return  # no codec on this handle (non-audio variant) — nothing to pin
+    rope_modules = [
+        m for m in tokenizer.modules()
+        if isinstance(m, modeling_mimi.MimiRotaryEmbedding)
+    ]
+    if not rope_modules:
+        raise RuntimeError(
+            "qwen3_tts: the speech tokenizer exposes no "
+            "MimiRotaryEmbedding modules — the rope invariant cannot be "
+            "pinned (transformers drift?). Refusing rather than "
+            "asserting nothing."
+        )
+    for module in rope_modules:
+        expected, _ = (
+            modeling_mimi.MimiRotaryEmbedding
+            .compute_default_rope_parameters(module.config)
+        )
+        got = module.inv_freq.to(device=expected.device,
+                                 dtype=expected.dtype)
+        if not torch.allclose(got, expected.to(device=got.device), atol=1e-6):
+            raise RuntimeError(
+                "qwen3_tts: codec rope divergence at load — the loaded "
+                "inv_freq does not equal transformers' "
+                "MimiRotaryEmbedding math for this config (theta or dim "
+                "mismatch between the checkpoint and the tolerant "
+                "fallback). Refusing rather than decoding on wrong rope."
+            )
+    logger.debug("qwen3_tts: codec rope pinned (%d modules)",
+                 len(rope_modules))
 
 
 # THE STATIC-CACHE BUDGET (ported from ComfyUI-Qwen3-TTS-Fast's loader,
@@ -279,7 +354,6 @@ def _load_warmed_handle(hf_dir: str, variant: str) -> Any:
                 f"installed: {e}"
             ) from e
     logger.info("qwen3_tts: loading variant=%s from %s", variant, hf_dir)
-    _ensure_rope_registry()
     # CUDA graph capture (warmup below) requires the native caching
     # allocator. ComfyUI defaults to cudaMallocAsync for torch 2.0+
     # (--cuda-malloc); under it the capture-time Triton matmul dies
@@ -298,13 +372,32 @@ def _load_warmed_handle(hf_dir: str, variant: str) -> Any:
     # Gate the allocation BEFORE the weights land: below this floor
     # the capture starves and Triton-dies after loading (third burn).
     _require_load_headroom(hf_dir, variant)
-    handle = FasterQwen3TTS.from_pretrained(
-        hf_dir,
-        device="cuda:0",
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        max_seq_len=_MAX_SEQ_LEN,
-    )
+    # THE LOAD-SCOPED ROPE PATCH (engine audit 2026-11-14, D1): the
+    # tolerant "default" initializer is installed around THIS
+    # from_pretrained only, then qwen's own registry entry is restored —
+    # the process-global registry never keeps melite's override, so
+    # other transformers families loaded in this interpreter keep
+    # qwen's semantics, not ours.
+    with _rope_registry_patched():
+        handle = FasterQwen3TTS.from_pretrained(
+            hf_dir,
+            device="cuda:0",
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            max_seq_len=_MAX_SEQ_LEN,
+        )
+    # The codec rope invariant: the tolerant fallback's output is the
+    # FINAL Mimi rope state (nothing restores it) — pin it to
+    # transformers' own math or refuse the load.
+    _assert_mimi_rope(handle)
+    # THE SHIM LOAD PATH IS LOAD-BEARING (engine audit 2026-11-14 §2):
+    # the tokenizer rides qwen's Qwen3TTSTokenizer.from_pretrained
+    # (restore_rope_buffers + restore_mimi_full_attention), which forces
+    # Mimi to decode FULL causal (window ≥ max_position_embeddings).
+    # Loading the tokenizer by ANY other path leaves the checkpoint's
+    # declared sliding_window 250/72 enforced at forward — decode
+    # texture degrades EVERYWHERE, silently. Never add a second
+    # tokenizer-load spelling.
     # Pre-init the static caches (Fast loader spelling) so the
     # library's own init loop is a no-op on transformers 4.x/5.x.
     _apply_compat(handle)

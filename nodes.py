@@ -776,12 +776,29 @@ class AudiocoreVoiceStudio:
                 }),
                 "temperature": ("FLOAT", {
                     "default": 0.9, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": (
+                        "Talker's first codebook only (engine audit "
+                        "2026-11-14, D3): the predictor's 15 sub-codebooks "
+                        "sample inside the captured CUDA graph with the "
+                        "checkpoint's own subtalker defaults — this knob "
+                        "never reaches them."
+                    ),
                 }),
                 "top_p": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": (
+                        "Talker's first codebook only (engine audit "
+                        "2026-11-14, D3) — the predictor's sub-codebooks "
+                        "keep the captured checkpoint defaults."
+                    ),
                 }),
                 "top_k": ("INT", {
                     "default": 50, "min": 0, "max": 200,
+                    "tooltip": (
+                        "Talker's first codebook only (engine audit "
+                        "2026-11-14, D3) — the predictor's sub-codebooks "
+                        "keep the captured checkpoint defaults."
+                    ),
                 }),
                 "repetition_penalty": ("FLOAT", {
                     "default": 1.05, "min": 0.8, "max": 2.0, "step": 0.01,
