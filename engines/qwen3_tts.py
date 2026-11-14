@@ -146,8 +146,20 @@ def _assert_mimi_rope(handle: Any) -> None:
     tokenizer = getattr(handle, "speech_tokenizer", None)
     if tokenizer is None:
         return  # no codec on this handle (non-audio variant) — nothing to pin
+    # The wrapper seam (the 21:48 D6 burn): handle.speech_tokenizer is
+    # qwen's Qwen3TTSTokenizer — a plain Python wrapper (qwen_tts/
+    # inference/qwen3_tts_tokenizer.py:44, no nn.Module base) whose
+    # ``model`` attribute carries the Mimi torch tree. Walk THAT tree;
+    # a wrapper without its codec is drift, not health — refuse loud.
+    codec = getattr(tokenizer, "model", None)
+    if codec is None:
+        raise RuntimeError(
+            "qwen3_tts: the speech tokenizer wrapper carries no model "
+            "tree — the rope invariant cannot be pinned (wrapper "
+            "drift?). Refusing rather than asserting nothing."
+        )
     rope_modules = [
-        m for m in tokenizer.modules()
+        m for m in codec.modules()
         if isinstance(m, modeling_mimi.MimiRotaryEmbedding)
     ]
     if not rope_modules:
