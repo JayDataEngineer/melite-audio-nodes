@@ -136,10 +136,30 @@ class TorchSfxEngine:
             }
             if on_progress is not None:
                 load_options["on_progress"] = on_progress
-            self.pipeline = MossSoundEffectPipeline.from_pretrained(
-                self.model_path,
-                **load_options,
-            )
+            # THE ROPE REGISTRY LEAK (engine audit follow-up, 2026-11-15):
+            # the text encoder here is a PLAIN Qwen3 checkpoint whose
+            # transformers-5.20 ``Qwen3Config`` keeps RoPE params in
+            # ``rope_parameters`` with NO top-level ``rope_theta`` —
+            # while qwen_tts's import re-seats ROPE_INIT_FUNCTIONS's
+            # ``"default"`` with an initializer that reads
+            # ``config.rope_theta`` unconditionally. Once ANY tts load
+            # has run in this interpreter, that entry is live in the
+            # registry and MOSS's ``from_pretrained`` dies with
+            # ``AttributeError: 'Qwen3Config' object has no attribute
+            # 'rope_theta'`` (live burn: the moss ambience arm reded
+            # after the tts arms greened, engine log 2026-11-14
+            # ~23:5x; standalone loads green — the crash is
+            # process-local and load-order-dependent). Load under the
+            # SAME tolerant patch the tts engines load under — absent
+            # restores to absent, so the patch never leaks past this
+            # load either.
+            from .qwen3_tts import _rope_registry_patched  # noqa: PLC0415
+
+            with _rope_registry_patched():
+                self.pipeline = MossSoundEffectPipeline.from_pretrained(
+                    self.model_path,
+                    **load_options,
+                )
             print(
                 f"✅ MOSS-SFX v2 loaded in {time.perf_counter() - t0:.1f}s",
                 flush=True,
