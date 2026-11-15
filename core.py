@@ -26,6 +26,7 @@ import glob as _glob
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -896,10 +897,18 @@ class ManagedModel:
 class _AudiocorePatcherStub:
     """Minimal stub that quacks like comfy.model_patcher.ModelPatcher."""
 
-    __slots__ = ("_managed",)
+    # ComfyUI core (>= 2026-05-25, CORE-184 MultiGPU Work Units) stamps every
+    # ModelPatcher with a clone_base_uuid at construction and comfy.multigpu
+    # READS it off every loaded model while scheduling work units
+    # (multigpu.py:167). A patcher-shaped object without the attribute
+    # AttributeError's the run — the qwen-img-21 e2e pair burned here
+    # (2026-11-15). Same semantic as core: one uuid per base, shared by
+    # clones of that base.
+    __slots__ = ("_managed", "clone_base_uuid")
 
     def __init__(self, managed: ManagedModel):
         self._managed = managed
+        self.clone_base_uuid = uuid.uuid4()
 
     @property
     def model(self):
