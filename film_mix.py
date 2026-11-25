@@ -28,16 +28,19 @@ built in doc order, ducked, joined last):
       law, card-hardcoded before, node-owned now) during every
       conditioned span (duck_spans, "start:end;…" seconds, ms
       precision);
-  music clips pre-mix into their own sub-bus (length_mode 'base'),
-      duck under the dialogue+sfx spans ONLY (music_duck_spans), then
-      join the film at unity;
+  music clips pre-mix into their own sub-bus as the UNION of their
+      placed extents (_stack_bus, length_mode 'longest' — a bus never
+      truncates to its first clip), duck under the dialogue+sfx spans
+      ONLY (music_duck_spans), then join the film at unity;
   dialogue/sfx clips overlay pristine at their seats: head silence to
       start_sec (sample-grain at the clip's own rate) + exact
       seat+dur fit (ms-rounded, the card's own law); dur 0 = unfitted
       (full length, never a fit);
-  every placement mixes with length_mode 'base' — a clip never
-      extends the cut; the sum clamps to [-1,1] (every AUDIO
-      producer's convention in this pack).
+  every placement mixes with length_mode 'base' onto the FILM — the
+      film is the cut and no clip extends it (the one lawful 'base':
+      the music bus unions its own clips first, then joins the film
+      through the same base law); the sum clamps to [-1,1] (every
+      AUDIO producer's convention in this pack).
 
 WINDOW-FILE LAW (the MeliteConcatVideos contract, mirrored): `videos`
 is a comma list of output-dir SaveVideo prefixes in film order; each
@@ -358,6 +361,24 @@ def _parse_clips(raw: str) -> list:
     return clips
 
 
+def _stack_bus(mix_node, bus, placed):
+    """Join one placed clip onto a running sub-bus.
+
+    THE UNION LAW (defect A1, cured 2026-11-25): a sub-bus is the UNION
+    of its clips' placed extents, so the join is ``length_mode="longest"``
+    — never the first argument's length. The bus used to stack with
+    "base", which truncated a second music clip placed past the first
+    one's end to zero samples before it was ever summed (runs
+    ca2c3198e17c and 6462805e37b0: two music rows held in the node's
+    own inputs, only the first delivered). The film's own length is
+    applied ONCE, where the finished bus joins the film track — there
+    "base" is the law, because the film is the clock.
+    """
+    if bus is None:
+        return placed
+    return mix_node.mix_audio(bus, placed, length_mode="longest")[0]
+
+
 class MeliteFilmAudioMix:
     """Compose the film's audio post-generation: window files + pinned clips + duck spans."""
 
@@ -537,8 +558,9 @@ class MeliteFilmAudioMix:
 
         # 3. THE PLACEMENTS (the retired tail's two loops, verbatim):
         #    dialogue/sfx onto the film track in doc order, then the
-        #    music sub-bus (doc order, 'base'), ducked under voice
-        #    spans only, joined last. duration fit = round(seat+dur to
+        #    music sub-bus (doc order, UNION — a bus never truncates
+        #    to its first clip), ducked under voice spans only, joined
+        #    last. duration fit = round(seat+dur to
         #    ms); dur 0 = unfitted (the card's own law, both arms).
         #    THE SEAT SOURCE (the wired-seat law): a wired row reads
         #    its seat's waveform + sample rate instead of decoding a
@@ -588,7 +610,7 @@ class MeliteFilmAudioMix:
                 if float(clip["dur_sec"]) > 0
                 else 0,
             )[0]
-            music_bus = placed if music_bus is None else mix.mix_audio(music_bus, placed, length_mode="base")[0]
+            music_bus = _stack_bus(mix, music_bus, placed)
         if music_bus is not None:
             if (music_duck_spans or "").strip():
                 music_bus = duck.duck_audio(
