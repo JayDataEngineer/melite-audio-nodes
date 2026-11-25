@@ -1468,27 +1468,26 @@ class MeliteAudioDuck:
             # span still holds the floor, and overlaps keep the
             # union floor by construction.
             ra = min(ramp, ib - ia)
-            rr = min(release, max(0, n - ib) + (ib - ia) // 2)
             local = torch.ones(n, dtype=wf.dtype)
             local[ia:ib] = gain
             if ra > 0:
                 local[ia:ia + ra] = torch.linspace(1.0, gain, ra, dtype=wf.dtype)
-            if rr > 0:
-                right = torch.linspace(gain, 1.0, rr, dtype=wf.dtype)
-                # the arc is ONE continuous ramp of length rr that
-                # begins tail_in samples before ib and (when the
-                # span's tail room was too short) continues past ib
-                # — value reaches unity only at the arc's true end,
-                # so the inside and spill slices are consecutive
-                # windows of `right`, never overlapping ends (the
-                # spill slice is right[tail_in:…], continuing from
-                # where the inside slice right[:tail_in] stopped)
-                tail_in = min(rr, (ib - ia) - ra)
-                if tail_in > 0:
-                    local[ib - tail_in:ib] = right[:tail_in]
-                spill = min(rr - tail_in, n - ib)
-                if spill > 0:
-                    local[ib:ib + spill] = right[tail_in:tail_in + spill]
+            if release > 0:
+                # THE RELEASE STARTS AT THE SPAN END (defect A2, cured
+                # 2026-11-25). The arc used to be drawn tail_in samples
+                # BEFORE ib and reach unity AT it, so the span's last
+                # release_ms came back un-ducked: a row ending on its
+                # last word let the model's own rendition of that word
+                # rise under the pasted take (runs of EP01 Draft 2
+                # Scene 2: b climbing 0.00 -> 0.96 across the row's last
+                # 10 frames, correlation 0.77..0.99 with the window).
+                # The floor now holds to the span end and the arc spills
+                # AFTER it; a span at the file's end simply has no tail
+                # room to release into (nothing sounds there).
+                rr = min(release, n - ib)
+                if rr > 0:
+                    right = torch.linspace(gain, 1.0, rr, dtype=wf.dtype)
+                    local[ib:ib + rr] = right
             torch.minimum(env, local, out=env)
         env = env.reshape(1, 1, n)
         return ({"waveform": wf * env, "sample_rate": sr},)
